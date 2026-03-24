@@ -636,6 +636,259 @@ class DUO(DUO_BASE):
                               dalpha_t=usdm_dalpha_t,
                               low_var=False)
 
+def _hyper_noise_example(x, t, nsteps):
+  """Simulate Brownian bridge SDE on the Poincaré ball.
+
+  Args:
+    x: (N, d) float tensor, points on the unit sphere boundary.
+    t: (N,) float tensor, bridge time values.
+    nsteps: int, number of Euler-Maruyama steps.
+
+  Returns:
+    (N, d) float tensor, noisy points inside the Poincaré ball.
+  """
+  assert x.ndim == 2
+  d = x.shape[-1]
+  N = x.shape[0]
+  delta = (t / nsteps).detach()
+  if delta.ndim == 0:
+    delta = torch.ones(N, device=x.device) * delta
+  delta = delta[:, None]
+  x64 = x.detach().to(torch.float64)
+  z = torch.zeros_like(x64)
+  for _ in range(nsteps):
+    sigma = 1 - z.square().sum(1, keepdim=True)
+    dW = (delta.sqrt() * sigma / 2) * torch.randn(
+      z.shape, dtype=torch.float64, device=z.device)
+    ito = -(delta * d * sigma / 4) * z
+    z_to_x = x64 - z
+    drift = ((delta * (d - 1) * sigma ** 2 / 2)
+             / z_to_x.square().sum(1, keepdim=True)) * z_to_x
+    z += dW + ito + drift
+    znorm = z.square().sum(1, keepdim=True).sqrt() + 1e-32
+    z = z * (znorm.clamp(max=0.999) / znorm)
+  y = z.to(torch.float32)
+  r = y.square().sum(1, keepdim=True).sqrt()
+  y = y / r
+  xdet = x.detach()
+  epsilon = (y * xdet).sum(1, keepdim=True)
+  return r * (epsilon * x
+              + y * (xdet * x).sum(1, keepdim=True)
+              - xdet * (y * x).sum(1, keepdim=True))
+
+
+def _hyper_noise_sequence(tokenids, embeds, t, nsteps):
+  """Apply hyperbolic Brownian bridge noise to a token sequence.
+
+  Args:
+    tokenids: (B, N) int tensor, token indices.
+    embeds: (V, d) float tensor, normalized embeddings on sphere.
+    t: (B,) float tensor, bridge times.
+    nsteps: int, number of Euler-Maruyama steps.
+
+  Returns:
+    (B, N, d) float tensor, noisy embeddings in the Poincaré ball.
+  """
+  assert embeds.ndim == 2
+  assert tokenids.ndim == 2
+  assert t.ndim == 1
+  B, N = tokenids.shape
+  assert t.shape[0] == B
+  return _hyper_noise_example(
+    embeds[tokenids.reshape(-1), :],
+    t[:, None].expand(B, N).reshape(-1),
+    nsteps).reshape(B, N, -1)
+
+
+def _hyper_loss(logits, targets, z, embeds, weights, ts):
+  """Compute hyperbolic diffusion score-matching loss.
+
+  Args:
+    logits: (B, N, V) model output logits.
+    targets: (B, N) ground-truth token indices.
+    z: (B, N, d) noisy points in the Poincaré ball.
+    embeds: (V, d) normalized embeddings on the sphere.
+    weights: (B,) importance weights.
+    ts: (B,) sampled times.
+
+  Returns:
+    (per_token_loss, lamb_est): per_token_loss is (B, N),
+      lamb_est is a scalar for adaptive lambda.
+  """
+  B, N, V = logits.shape
+  V2, d = embeds.shape
+  assert V == V2
+  assert targets.shape == (B, N)
+  assert z.shape == (B, N, d)
+  assert weights.shape == (B,)
+  # Horosphere distances from z to all embeddings: (B, N, V)
+  z_sq = z.square().sum(-1, keepdim=True)
+  exp_horo = ((1 - z_sq)
+              / (z_sq + 1 - 2 * z @ embeds.t()))
+  log_horo = exp_horo.log()
+  # Posterior distribution: (B, N, V)
+  mu = ((d - 1) * log_horo + logits).softmax(-1)
+  mu = mu - F.one_hot(targets, V).to(mu.dtype)
+  # Score-matching error
+  error = ((mu * exp_horo) @ embeds
+           - (mu * exp_horo).sum(-1, keepdim=True) * z)
+  tlosses = ((d - 1) * error).square().sum(-1) * weights[:, None]
+  with torch.no_grad():
+    tl_sq = tlosses.square()
+    lamb_est = (tl_sq.sum()
+                / (ts[:, None] * tl_sq).sum()).item()
+  return tlosses, lamb_est
+
+
+class HyperbolicDUO(DUO_BASE):
+  def __init__(self, config, tokenizer):
+    # Load pre-built trainset with embeddings
+    trainset_path = config.algo.trainset_path
+    trainset = torch.load(trainset_path, weights_only=True)
+    d = trainset['A_emb'].shape[1]
+
+    # Call TrainerBase.__init__ directly
+    trainer_base.TrainerBase.__init__(
+      self, config, tokenizer)
+    self._validate_configuration()
+
+    # Now Module is initialized — create parameters & buffers
+    self.hyper_dim = d
+    self.hyper_embeds = torch.nn.Parameter(
+      trainset['A_emb'].clone())
+    self.noise_euler_steps = config.algo.noise_euler_steps
+    self.lamb_factor = config.algo.lamb_factor
+    self.lamb_decay_exp = config.algo.lamb_decay_exp
+    self.register_buffer(
+      'initial_bias', trainset['initial_bias'].clone())
+    with torch.no_grad():
+      self.backbone.vocab_embed.embedding.copy_(
+        trainset['E_emb'])
+    self._lamb = self.lamb_factor * d ** 2 / 8
+
+    # Re-initialize EMA to include hyper_embeds
+    if self.config.training.ema > 0:
+      import models.ema
+      self.ema = models.ema.ExponentialMovingAverage(
+        self._get_parameters(),
+        decay=self.config.training.ema)
+
+  def _validate_configuration(self):
+    assert self.time_conditioning
+    assert self.parameterization == 'mean'
+    assert self.T == 0
+
+  def _get_parameters(self):
+    """Include hyper_embeds in EMA."""
+    import itertools
+    params = [self.backbone.parameters(),
+              self.noise.parameters()]
+    if hasattr(self, 'hyper_embeds'):
+      params.append([self.hyper_embeds])
+    return itertools.chain(*params)
+
+  @torch.no_grad()
+  def normalize_embeds(self):
+    self.hyper_embeds.copy_(
+      self.hyper_embeds
+      / self.hyper_embeds.norm(dim=-1, keepdim=True))
+
+  def _compute_zemb(self, mu):
+    """Weighted embedding with norm preservation.
+
+    Args:
+      mu: (B, N, V) soft distribution over vocabulary.
+    Returns:
+      (B, N, hidden) continuous embedding for the backbone.
+    """
+    vocab_embed = self.backbone.vocab_embed.embedding
+    zemb = mu @ vocab_embed
+    # Norm-preservation trick: match expected norm under mu
+    embed_norms = (vocab_embed.float()
+                   .square().sum(-1, keepdim=True).sqrt())
+    zemb_norms = mu.float() @ embed_norms
+    actual_norms = (zemb.float()
+                    .square().sum(-1, keepdim=True).sqrt())
+    zemb = zemb * (zemb_norms / (actual_norms + 1e-8)).to(
+      zemb.dtype)
+    return zemb
+
+  def _forward_backbone_pre_embedded(self, x_emb, sigma):
+    """Forward pass with pre-computed continuous embeddings."""
+    sigma = self._process_sigma(sigma)
+    with torch.amp.autocast('cuda', dtype=torch.float32):
+      out = self.backbone(
+        x=x_emb, sigma=sigma, pre_embedded=True)
+    return out
+
+  def nll(self, x0, labels, output_tokens,
+          current_accumulation_step=None, train_mode=False):
+    del labels, output_tokens, current_accumulation_step
+    B, N = x0.shape
+    d = self.hyper_dim
+    embeds_n = (self.hyper_embeds
+                / self.hyper_embeds.norm(dim=-1, keepdim=True))
+    # --- Sample time from exponential (antithetic) ---
+    u = ((torch.arange(B, device=self.device).float()
+          + torch.rand(B, device=self.device)) / B)
+    ts = -(u.clamp(min=1e-5, max=0.999).log()) / self._lamb
+    weights = (self._lamb * ts).exp() / self._lamb
+    # Sigma for AdaLN time conditioning
+    sigma = ts.unsqueeze(-1).expand(B, N)
+    # --- Brownian bridge corruption ---
+    with torch.device(self.device):
+      z = _hyper_noise_sequence(
+        x0, embeds_n, ts, self.noise_euler_steps)
+    # --- Horosphere distances → posterior → embeddings ---
+    z_sq = z.square().sum(-1, keepdim=True)
+    exp_horo = ((1 - z_sq)
+                / (z_sq + 1 - 2 * z @ self.hyper_embeds.t()))
+    log_horo = exp_horo.log()
+    mu = ((d - 1) * log_horo + self.initial_bias).softmax(-1)
+    embed_dtype = self.backbone.vocab_embed.embedding.dtype
+    zemb = self._compute_zemb(mu.to(embed_dtype))
+    # Prior embedding (constant across positions)
+    initial_probs = self.initial_bias.softmax(0)
+    mu0 = initial_probs.view(1, 1, -1).expand(B, N, -1)
+    zemb0 = self._compute_zemb(mu0.to(embed_dtype))
+    # --- Two forward passes (noisy + prior baseline) ---
+    logits = self._forward_backbone_pre_embedded(zemb, sigma)
+    logits0 = self._forward_backbone_pre_embedded(
+      zemb0, sigma)
+    combined = logits - logits0 + self.initial_bias
+    # --- Hyperbolic loss with variance reduction ---
+    loss, lamb_est = _hyper_loss(
+      combined, x0, z, embeds_n, weights, ts)
+    baseline = self.initial_bias[None, None, :].expand_as(
+      combined)
+    loss_vr, _ = _hyper_loss(
+      baseline, x0, z, embeds_n, weights, ts)
+    self._lamb_est = lamb_est
+    # prior_entropy is a constant (no gradient); matches reference
+    initial_probs = self.initial_bias.softmax(0)
+    prior_entropy = torch.special.entr(initial_probs).sum()
+    # /2 matches reference's tlosses.sum()/(2*N*B) normalization
+    # prior_entropy added undivided, matching reference
+    return (loss - loss_vr) / 2 + prior_entropy
+
+  def training_step(self, batch, batch_idx):
+    result = super().training_step(batch, batch_idx)
+    # Adaptive lambda
+    self._lamb = self._lamb * (
+      self.lamb_factor * self._lamb_est / self._lamb
+    ) ** self.lamb_decay_exp
+    self.log('hyper/lambda', self._lamb,
+             on_step=True, on_epoch=False, sync_dist=True)
+    return result
+
+  def on_train_batch_end(self, outputs, batch, batch_idx):
+    """Normalize after optimizer step (matches reference)."""
+    self.normalize_embeds()
+
+  def nll_per_token(self, *args, **kwargs):
+    raise NotImplementedError(
+      'HyperbolicDUO computes loss directly in nll()')
+
 
 class Distillation(DUO):
   def __init__(self, config, tokenizer):

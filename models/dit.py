@@ -474,9 +474,11 @@ class DIT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     else:
       return  bias_dropout_add_scale_fused_inference
 
-  def forward(self, x, sigma, class_cond=None, weights=None):
+  def forward(self, x, sigma, class_cond=None, weights=None,
+              pre_embedded=False):
     assert class_cond is None, 'Not implemented for DiT'
-    x = self.vocab_embed(x, weights)
+    if not pre_embedded:
+      x = self.vocab_embed(x, weights)
     if self.causal:
       t_cond = None
     else:

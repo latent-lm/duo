@@ -1,7 +1,7 @@
 name: hyperbolic_duo
 backbone: dit
 parameterization: mean
-time_conditioning: True
+time_conditioning: False
 T: 0
 subs_masking: False
 causal_attention: False

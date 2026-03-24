@@ -314,6 +314,8 @@ def main(config):
     diffusion_model = algo.SEDDAbsorb
   elif config.algo.name == 'duo':
     diffusion_model = algo.DUO
+  elif config.algo.name == 'hyperbolic_duo':
+    diffusion_model = algo.HyperbolicDUO
   elif config.algo.name == 'distillation':
     diffusion_model = algo.Distillation
   elif config.algo.name == 'ot-finetune':
