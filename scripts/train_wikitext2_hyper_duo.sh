@@ -16,12 +16,10 @@
 # Hyperbolic DUO on wikitext2, single A6000
 # Two forward passes per step (variance reduction), so halve batch vs DUO
 python -u -m main \
-  loader.batch_size=32 \
-  loader.eval_batch_size=32 \
+  loader.batch_size=64 \
+  loader.eval_batch_size=64 \
   data=wikitext2 \
   wandb.name=hyper-duo-wikitext2 \
   model=small \
-  model.n_blocks=8 \
-  model.n_heads=8 \
   algo=hyperbolic_duo \
-  model.length=256
+  model.length=128

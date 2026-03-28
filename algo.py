@@ -739,6 +739,46 @@ def _hyper_loss(logits, targets, z, embeds, weights, ts):
                 / (ts[:, None] * tl_sq).sum()).item()
   return tlosses, lamb_est
 
+def _hyper_loss_simple(logits, targets, z, embeds, weights, ts):
+  """Compute hyperbolic diffusion score-matching loss.
+
+  Args:
+    logits: (B, N, V) model output logits.
+    targets: (B, N) ground-truth token indices.
+    z: (B, N, d) noisy points in the Poincaré ball.
+    embeds: (V, d) normalized embeddings on the sphere.
+    weights: (B,) importance weights.
+    ts: (B,) sampled times.
+
+  Returns:
+    (per_token_loss, lamb_est): per_token_loss is (B, N),
+      lamb_est is a scalar for adaptive lambda.
+  """
+  B, N, V = logits.shape
+  V2, d = embeds.shape
+  assert V == V2
+  assert targets.shape == (B, N)
+  assert z.shape == (B, N, d)
+  assert weights.shape == (B,)
+  # Horosphere distances from z to all embeddings: (B, N, V)
+  z_sq = z.square().sum(-1, keepdim=True)
+  exp_horo = ((1 - z_sq)
+              / (z_sq + 1 - 2 * z @ embeds.t()))
+  log_horo = exp_horo.log()
+
+  # Horosphere distances from z to all embeddings: (B, N, V)
+  exp_horo_pred = ((1 - z_sq)
+              / (z_sq + 1 - 2 * z @ logits.t()))
+  log_horo_pred = exp_horo.log()
+  # Score-matching error
+  error = (log_horo - log_horo_pred).sum(-1, keepdim=True) * z)
+  tlosses = ((d - 1) * error).square().sum(-1) * weights[:, None]
+  with torch.no_grad():
+    tl_sq = tlosses.square()
+    lamb_est = (tl_sq.sum()
+                / (ts[:, None] * tl_sq).sum()).item()
+  return tlosses, lamb_est
+
 
 class HyperbolicDUO(DUO_BASE):
   def __init__(self, config, tokenizer):
@@ -823,6 +863,11 @@ class HyperbolicDUO(DUO_BASE):
 
   def nll(self, x0, labels, output_tokens,
           current_accumulation_step=None, train_mode=False):
+    return nll_simple(x0, labels, output_tokens,
+        current_accumulation_step, train_mode):
+
+  def nll_var_reduced(self, x0, labels, output_tokens,
+          current_accumulation_step=None, train_mode=False):
     del labels, output_tokens, current_accumulation_step
     B, N = x0.shape
     d = self.hyper_dim
@@ -868,8 +913,125 @@ class HyperbolicDUO(DUO_BASE):
     initial_probs = self.initial_bias.softmax(0)
     prior_entropy = torch.special.entr(initial_probs).sum()
     # /2 matches reference's tlosses.sum()/(2*N*B) normalization
-    # prior_entropy added undivided, matching reference
-    return (loss - loss_vr) / 2 + prior_entropy
+    # prior_entropy is a single scalar; divide by B*N so it's
+    # counted once in the total, not once per token.
+    return (loss - loss_vr) / 2 + prior_entropy / (B * N)
+
+  def nll_simple(self, x0, labels, output_tokens,
+          current_accumulation_step=None, train_mode=False):
+    del labels, output_tokens, current_accumulation_step
+    B, N = x0.shape
+    d = self.hyper_dim
+    embeds_n = (self.hyper_embeds
+                / self.hyper_embeds.norm(dim=-1, keepdim=True))
+    # --- Sample time from exponential (antithetic) ---
+    u = ((torch.arange(B, device=self.device).float()
+          + torch.rand(B, device=self.device)) / B)
+    ts = -(u.clamp(min=1e-5, max=0.999).log()) / self._lamb
+    weights = (self._lamb * ts).exp() / self._lamb
+    # Sigma for AdaLN time conditioning
+    sigma = ts.unsqueeze(-1).expand(B, N)
+    # --- Brownian bridge corruption ---
+    with torch.device(self.device):
+      z = _hyper_noise_sequence(
+        x0, embeds_n, ts, self.noise_euler_steps)
+    # --- Two forward passes (noisy + prior baseline) ---
+    logits = self._forward_backbone_pre_embedded(z, sigma)
+    # --- Hyperbolic loss with variance reduction ---
+    loss, lamb_est = _hyper_loss(
+      logits, x0, z, embeds_n, weights, ts)
+    # /2 matches reference's tlosses.sum()/(2*N*B) normalization
+    # prior_entropy is a single scalar; divide by B*N so it's
+    # counted once in the total, not once per token.
+    return loss
+
+  @torch.no_grad()
+  def generate_samples(self, num_samples, **kwargs):
+    """Generate samples via score-guided SDE on the Poincaré ball.
+
+    Simulates the forward bridge SDE from the origin (prior) toward
+    the boundary (data), replacing the unknown-target bridge drift
+    with the expected drift under the model's posterior.
+
+    The per-step update mirrors _hyper_noise_example:
+      sigma_hyp = 1 - |z|^2
+      ito       = -(d * sigma_hyp / 4) * z * dt
+      drift     = (d-1) * (sigma_hyp / 2) * score_dir * dt
+      noise     = sqrt(dt) * (sigma_hyp / 2) * N(0, I)
+
+    where score_dir = (mu * exp_horo) @ embeds - (mu * exp_horo).sum * z
+    is the expected bridge drift direction under the posterior mu.
+    """
+    B = num_samples
+    N = self.num_tokens
+    d = self.hyper_dim
+    num_steps = self.config.sampling.steps
+    eps = 1e-3
+
+    embeds_n = (self.hyper_embeds
+                / self.hyper_embeds.norm(dim=-1, keepdim=True))
+    embeds_n_64 = embeds_n.to(torch.float64)
+
+    # Time grid: 0 -> t_max  (origin -> boundary)
+    t_max = -np.log(eps) / self._lamb
+    dt = t_max / num_steps
+
+    # Initialise at the origin of the Poincaré ball
+    z = torch.zeros(B, N, d, device=self.device,
+                    dtype=torch.float64)
+
+    for i in range(num_steps):
+      t_mid = (i + 0.5) * dt
+      sigma_time = torch.full(
+        (B, N), t_mid, device=self.device)
+      z_f32 = z.float()
+
+      # Horosphere distances from z to every embedding (B,N,V)
+      z_sq = z_f32.square().sum(-1, keepdim=True)
+      exp_horo = ((1 - z_sq)
+                  / (z_sq + 1 - 2 * z_f32 @ embeds_n.t()))
+      log_horo = exp_horo.log()
+
+      # Backbone forward pass (matches nll_simple)
+      logits = self._forward_backbone_pre_embedded(
+        z_f32, sigma_time)
+
+      # Posterior over vocabulary tokens (B,N,V)
+      mu = ((d - 1) * log_horo + logits).softmax(-1)
+
+      # Expected bridge-drift direction (B,N,d)
+      mu_64 = mu.to(torch.float64)
+      eh_64 = exp_horo.to(torch.float64)
+      score_dir = ((mu_64 * eh_64) @ embeds_n_64
+                   - (mu_64 * eh_64).sum(
+                       -1, keepdim=True) * z)
+
+      # Euler-Maruyama step
+      sigma_hyp = 1 - z.square().sum(-1, keepdim=True)
+      ito = -(d * sigma_hyp / 4) * z * dt
+      bridge = (d - 1) * (sigma_hyp / 2) * score_dir * dt
+      noise = (dt ** 0.5 * sigma_hyp / 2) * torch.randn(
+        B, N, d, dtype=torch.float64, device=self.device)
+
+      z = z + ito + bridge + noise
+
+      # Clamp inside the Poincaré ball
+      znorm = z.square().sum(
+        -1, keepdim=True).sqrt() + 1e-32
+      z = z * (znorm.clamp(max=0.999) / znorm)
+
+    # ----- final token prediction -----
+    z_f32 = z.float()
+    z_sq = z_f32.square().sum(-1, keepdim=True)
+    exp_horo = ((1 - z_sq)
+                / (z_sq + 1 - 2 * z_f32 @ embeds_n.t()))
+    log_horo = exp_horo.log()
+    sigma_time = torch.full(
+      (B, N), t_max, device=self.device)
+    logits = self._forward_backbone_pre_embedded(
+      z_f32, sigma_time)
+    posterior = ((d - 1) * log_horo + logits).softmax(-1)
+    return trainer_base.sample_categorical(posterior)
 
   def training_step(self, batch, batch_idx):
     result = super().training_step(batch, batch_idx)

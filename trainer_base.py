@@ -59,6 +59,49 @@ class Cosine(torch.nn.Module):
     return t
 
 
+class FlowMatching(torch.nn.Module):
+  """Flow matching noise schedule (Lipman et al., 2023).
+
+  With shift=1 (default), uses the standard linear probability path:
+    alpha_t = 1 - t,  dalpha/dt = -1
+
+  With shift != 1 (Esser et al., 2024), applies a time warp:
+    alpha_t = 1 - s*t / (1 + (s-1)*t)
+  Shift > 1 pushes more noise budget toward t=0 (harder early);
+  shift < 1 pushes it toward t=1.
+  """
+  def __init__(self, eps, shift=1.0):
+    super().__init__()
+    self.eps = eps
+    self.shift = shift
+
+  def forward(self, t):
+    s = self.shift
+    if s == 1.0:
+      alpha_t = 1 - t
+      dalpha_t = -torch.ones_like(t)
+    else:
+      denom = 1 + (s - 1) * t
+      alpha_t = 1 - s * t / denom
+      dalpha_t = -s / (denom ** 2)
+    alpha_t = alpha_t.clamp(min=self.eps)
+    return dalpha_t, alpha_t
+
+  def get_t_for_alpha(self, alpha_t):
+    is_tensor = torch.is_tensor(alpha_t)
+    if not is_tensor:
+      alpha_t = torch.tensor([alpha_t])
+    s = self.shift
+    u = 1 - alpha_t
+    if s == 1.0:
+      t = u
+    else:
+      t = u / (s - (s - 1) * u)
+    if not is_tensor:
+      t = t.cpu().item()
+    return t
+
+
 def sample_categorical(categorical_probs):
   gumbel_norm = (
     1e-10
@@ -117,6 +160,10 @@ class TrainerBase(L.LightningModule):
       self.noise = LogLinear(config.noise.eps)
     elif config.noise.type == 'cosine':
       self.noise = Cosine(config.noise.eps)
+    elif config.noise.type == 'flow-matching':
+      self.noise = FlowMatching(
+        config.noise.eps,
+        shift=config.noise.get('shift', 1.0))
     else:
       raise ValueError(config.noise.type)
     # Class-conditional training arguments
