@@ -356,11 +356,26 @@ class TrainerBase(L.LightningModule):
                         train_mode=True)
     self.metrics.update_train(losses.nlls, losses.prior_loss,
                               losses.num_tokens)
-    self.log(name='trainer/loss',
+    nll = self.metrics.train_nlls['nll'].compute()
+    ppl = self.metrics.train_nlls['ppl'].compute()
+    self.log(name='train/loss',
              value=losses.loss.item(),
              on_step=True,
              on_epoch=False,
-             sync_dist=True)
+             sync_dist=True,
+             prog_bar=True)
+    self.log(name='train/nll',
+             value=nll,
+             on_step=True,
+             on_epoch=False,
+             sync_dist=True,
+             prog_bar=True)
+    self.log(name='train/ppl',
+             value=ppl,
+             on_step=True,
+             on_epoch=False,
+             sync_dist=True,
+             prog_bar=True)
     return losses.loss
 
   def on_train_epoch_end(self):

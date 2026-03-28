@@ -11,5 +11,7 @@ loss_type: elbo
 # Hyperbolic diffusion parameters
 trainset_path: /share/thickstun/sychou/workspace/research/duo/hyper_dataset/word_embedding/trainset_gpt2_wikitext2_ml128_bs32.pt
 noise_euler_steps: 128
+hyper_T: 1000
 lamb_factor: 0.25
 lamb_decay_exp: 0.05
+tainable_hyper_embeds: False
