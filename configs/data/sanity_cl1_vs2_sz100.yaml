@@ -1,0 +1,9 @@
+train: sanity_cl1_vs2_sz100
+valid: sanity_cl1_vs2_sz100
+modality: text
+tokenizer_name_or_path: sanity_vs2
+cache_dir: /share/thickstun/sychou/.cache/huggingface/datasets
+wrap: True
+streaming: False
+insert_train_eos: True
+insert_valid_eos: True

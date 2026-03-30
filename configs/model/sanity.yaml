@@ -1,0 +1,11 @@
+name: sanity
+type: ddit
+hidden_size: 32
+cond_dim: 32
+length: 1
+n_blocks: 2
+n_heads: 4
+scale_by_sigma: True
+dropout: 0.0
+tie_word_embeddings: False
+vocab_lookup: True

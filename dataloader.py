@@ -717,6 +717,8 @@ def get_tokenizer(config):
       from_pretrained('bert-base-uncased')
   elif config.data.tokenizer_name_or_path == 'synthetic':
     tokenizer = SyntheticTokenizer(vocab_size=256)
+  elif config.data.tokenizer_name_or_path == 'sanity_vs2':
+    tokenizer = SyntheticTokenizer(vocab_size=2)  # V=2, BOS=0, EOS=1
   elif config.data.tokenizer_name_or_path == 'cifar10':
     return RawPixelsVisionTokenizer(
       vocab_size=256, image_size=32, add_special_tokens=False, 
