@@ -805,6 +805,7 @@ class HyperbolicDUO(DUO_BASE):
       self.normalize_embeds()
     self.noise_euler_steps = config.algo.noise_euler_steps
     self.hyper_T = config.algo.hyper_T
+    self.hyper_loss_type = config.algo.hyper_loss_type
     self.lamb_factor = config.algo.lamb_factor
     self.lamb_decay_exp = config.algo.lamb_decay_exp
     self.register_buffer(
@@ -889,28 +890,38 @@ class HyperbolicDUO(DUO_BASE):
     return self.nll_simple(x0, labels, output_tokens,
         current_accumulation_step, train_mode)
 
-  def nll_per_token(self, z, y, f_pred, loss_type: str="l2"):
-    """Per-token NELBO integrand via direction matching.
+  def nll_per_token(self, z, y, f_pred, loss_type: str="l2",
+                    logits=None, x0=None, embeds_n=None):
+    """Per-token loss for hyperbolic diffusion.
 
     -> loss_type = "raw_kl"
     Computes the instantaneous KL contribution (in nats):
       (d-1)^2 / 2 * (1 - ||z||^2)^2 *
         || (y-z)/||y-z||^2 - (f-z)/||f-z||^2 ||^2
     -> loss_type = "l2"
-    Per-token MSE endpoint prediction loss
-        ||f - y||
-
-    This is the Girsanov KL between the true bridge drift
-    (toward y) and the predicted bridge drift (toward f).
+    Per-token MSE endpoint prediction loss:
+        ||f - y||^2
+    -> loss_type = "ce"
+    Cross-entropy through the hyperbolic posterior:
+        -log p(x0 | f_pred), where p = softmax(normalize(f_pred) @ embeds^T)
 
     Args:
       z: (B, N, d) noisy points inside the Poincaré ball.
       y: (B, N, d) true target embeddings (unit sphere).
       f_pred: (B, N, d) model-predicted target points.
+      loss_type: "l2", "raw_kl", or "ce".
+      logits: (B, N, V) backbone logits (unused, kept for API).
+      x0: (B, N) true token indices (required for "ce").
+      embeds_n: (V, d) normalized embeddings (required for "ce").
     Returns:
-      (B, N) per-token KL integrand in nats.
+      (B, N) per-token loss.
     """
-    if loss_type == "l2":
+    if loss_type == "ce":
+      posterior = self._endpoint_posterior(f_pred, embeds_n)
+      return F.nll_loss(
+        posterior.clamp(min=1e-8).log().transpose(1, 2),
+        x0, reduction='none')
+    elif loss_type == "l2":
       return (f_pred - y).square().sum(-1)
     elif loss_type == "raw_kl":
       d = self.hyper_dim
@@ -926,8 +937,6 @@ class HyperbolicDUO(DUO_BASE):
       error = dir_y - dir_f
       sigma_hyp_sq = (1 - z.square().sum(-1)).square()
 
-      # return ((d - 1) ** 2 / 2
-      #         * sigma_hyp_sq * error.square().sum(-1))
       return sigma_hyp_sq * error.square().sum(-1)
     else:
       raise ValueError(f"loss_type, {loss_type}, is not supported.")
@@ -977,8 +986,11 @@ class HyperbolicDUO(DUO_BASE):
     # --- True target embedding ---
     y = embeds_n[x0]                            # (B, N, d)
 
-    # --- Per-token NELBO integrand (includes 1/2 factor) ---
-    kl = self.nll_per_token(z, y, f_pred, loss_type="l2")       # (B, N)
+    # --- Per-token loss ---
+    kl = self.nll_per_token(z, y, f_pred,
+                            loss_type=self.hyper_loss_type,
+                            logits=logits, x0=x0,
+                            embeds_n=embeds_n)    # (B, N)
 
     return kl                                   # (B, N)
 
