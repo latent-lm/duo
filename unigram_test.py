@@ -273,6 +273,18 @@ class UnigramHyperbolicDLM(L.LightningModule):
   def _time_from_tau(self, tau_steps: torch.Tensor):
     return tau_steps.to(dtype=torch.float32, device=self.device) * self.config.hyper_dt
 
+  def _reconstruction_residual_terms(self, z: torch.Tensor, y: torch.Tensor,
+                                     pred: torch.Tensor):
+    pred_n = self.bridge.normalize_endpoint(pred)
+    conf = (1 - z.square().sum(dim=-1, keepdim=True)).clamp(min=1e-8)
+    diff = pred_n - z
+    sq_diff = diff.square().sum(dim=-1, keepdim=True).clamp(min=1e-8)
+    drift = (((self.config.hyper_dim - 1) / 2)
+             * conf.square() / sq_diff * diff
+             - (self.config.hyper_dim / 4) * conf * z)
+    residual = y - z + drift * self.config.hyper_dt
+    return pred_n, conf, diff, residual
+
   def _compute_losses(self, tokens: torch.Tensor):
     tokens = tokens.to(dtype=torch.long, device=self.device)
     y = self.bridge.endpoints[tokens]
@@ -296,14 +308,8 @@ class UnigramHyperbolicDLM(L.LightningModule):
     z_recon = self.bridge.sample_states(y, tau_recon)
     pred_recon = self.model(z_recon, t_recon)
     recon = self.bridge.reconstruction_term(z_recon, y, pred_recon)
-    pred_recon_n = self.bridge.normalize_endpoint(pred_recon)
-    recon_conf = (1 - z_recon.square().sum(dim=-1, keepdim=True)).clamp(min=1e-8)
-    recon_diff = pred_recon_n - z_recon
-    recon_sq_diff = recon_diff.square().sum(dim=-1, keepdim=True).clamp(min=1e-8)
-    recon_drift = (((self.config.hyper_dim - 1) / 2)
-                   * recon_conf.square() / recon_sq_diff * recon_diff
-                   - (self.config.hyper_dim / 4) * recon_conf * z_recon)
-    recon_residual = y - z_recon + recon_drift * self.config.hyper_dt
+    _, recon_conf, recon_diff, recon_residual = (
+      self._reconstruction_residual_terms(z_recon, y, pred_recon))
     recon_conf_sq = recon_conf.squeeze(-1).square()
     recon_last_step = recon_diff.square().sum(dim=-1)
     horocycle_scale = 2.0 / (recon_conf_sq * self.config.hyper_dt)
