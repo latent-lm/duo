@@ -1,9 +1,9 @@
 ### Brownian Motion on Manifold
-Given a d-dimensional SDE as $d z_t = f(z_t, t) dt + \sigma(t) dw$ on the hyperbolic space $\mathbb{H}^d$, the SDE on the local chart of Poincare Disk $\mathbb{D}^d$ is described as
+Given a d-dimensional SDE as $d z_t = f(z_t, t) dt + \sigma(t) dw$ on the hyperbolic space $\mathbb{H}^d$, the SDE with $t: 0 \to \infty$ on the local chart of Poincare Disk $\mathbb{D}^d$ is described as
 $$dx_t = \left( f(x_t, t) + \frac{\sigma^2 (d-2) (1 - \|x_t\|^2)}{4} x_t \right) dt + \frac{\sigma (1 - \|x_t\|^2)}{2} dW_t$$
 > Proof: Derive the SDE on the local chart of Poincare Disk
 
-Given a target point $y$ at the boundary of the Poincare Disk $||y|| = 1$, the Brownian bridge is described as
+Given a target point $y$ at the boundary of the Poincare Disk $||y|| = 1$, the Brownian bridge with $t: \infty \to 0$ is described as
 $$dx_t = \left( f(x_t, t) + \sigma^2(t) \frac{d-1}{2} \frac{(1-\|x_t\|^2)^2}{\|y-x_t\|^2} (y-x_t) - \frac{\sigma^2(t) d}{4} (1-\|x_t\|^2) x_t \right) dt + \frac{\sigma(t) (1-\|x_t\|^2)}{2} d\bar{W}_t$$
 Therefore, $q(y | x_t)$ is
 $$
@@ -30,17 +30,112 @@ $$
 \boxed{ D_{\mathrm{KL}}(p\|q) = \frac12 \left[ d\log\frac{\sigma_1^2}{\sigma_0^2} -d +d\frac{\sigma_0^2}{\sigma_1^2} +\frac{\|\mu_1-\mu_0\|^2}{\sigma_1^2} \right]. }
 $$
 ### NELBO in Discrete Space
-To convert the continuous state $x_t$ to discrete state $x_t'$, we project the $d$-dimensional continuous state $x_t$ to $K$-dimensional discrete state by applying a projection matrix $E \in \mathbb{R}^{K \times d}$ and a softmax function  $x_t' = \arg \max ( x_t E^{\top})$. For a probability model $p_{\theta}$ and a Brownian motion $x_{1:T}$, the discrete NELBO on the state $x_{t}'$ of the Brownian bridge conditioned on $x_0'$ is 
+To convert the continuous state $w_t$ to discrete state $w_t$, we project the $d$-dimensional continuous state $x_t$ to $K$-dimensional discrete state by applying a projection matrix $E \in \mathbb{R}^{K \times d}$ and a softmax function  $w_t = softmax ( \frac{E x_t}{\mathcal{T}})$. For a probability model $p_{\theta}$ and a Brownian motion $x_{1:T}$, the discrete NELBO on the state $w_{t}$ of the Brownian bridge conditioned on $w_0$ is 
 $$
 \begin{aligned}
-- \log p_{\theta}(x_0') 
-& \leq \mathbb{E}_{q(x_{0:T}')} \Big[ \log\frac{q(x_{1:T}' | x_0')}{p_\theta(x_{0:T}')} \Big] \\
-& = \mathbb{E}_q [\underbrace{D_\text{KL}(q(x_T' \vert x_0') \parallel p_\theta(x_T'))}_{\text{Prior}} + \sum_{t=2}^T \underbrace{D_\text{KL}(q(x_{t-1}' \vert x_t', x_0') \parallel p_\theta(x_{t-1}' \vert x_t'))}_{\text{Diffusion}} \underbrace{- \log p_\theta(x_0' \vert x_1')}_{\text{Reconst}} ]
+- \log p_{\theta}(w_0) 
+& \leq \mathbb{E}_{q(w_{0:T})} \Big[ \log\frac{q(w_{1:T} | w_0)}{p_\theta(w_{0:T})} \Big] \\
+& = \mathbb{E}_q [\underbrace{D_\text{KL}(q(w_T \vert w_0) \parallel p_\theta(w_T))}_{\text{Prior}} + \sum_{t=2}^T \underbrace{D_\text{KL}(q(w_{t-1} \vert w_t, w_0) \parallel p_\theta(w_{t-1} \vert w_t))}_{\text{Diffusion}} \underbrace{- \log p_\theta(w_0 \vert w_1)}_{\text{Reconst}} ]
 \end{aligned}
 $$
 Note that the KL divergence between categorical distribution $p = \text{Cat}(\{p_i\}_{i=1}^{K})$ and $q = \text{Cat}(\{q_i\}_{i=1}^{K})$ is
 $$
 D_{\mathrm{KL}}(p\|q) = CE(p,q) - H(p) = -\sum_{i=1}^{K} p_i \log q_i + \sum_{i}^{K} p_i \log p_i
+$$
+### NELBO in Discrete Space
+To convert the continuous state $x_t$ to discrete state $w_t$, we project the $d$-dimensional continuous state $x_t$ to $K$-dimensional discrete state by applying a projection matrix $E \in \mathbb{R}^{K \times d}$ and a softmax function  $w_t = softmax ( \frac{E x_t}{\mathcal{T}})$. Additionally, $x_{0:T}$ is a Markov chain and $w_t$ only depends on the $x_t$. Therefore, we choose $q(w_{1:T}, x_{0:T} | w_0)$ as the proposal distribution because $w_0$ is observable while both $w_{1:T}$ and $x_{0:T}$ are latents. Denote the learned probability model as $p_{\theta}$ and a Brownian motion as $x_{1:T}$.
+
+Let
+$$
+\begin{aligned}
+-\log p_\theta(w_0)
+&\le \mathcal L_{\mathrm{VLB}}(w_0)
+:= \mathbb E_{q(w_{1:T},x_{0:T}\mid w_0)}
+\left[
+\log \frac{q(w_{1:T},x_{0:T}\mid w_0)}{p_\theta(w_{0:T},x_{0:T})}
+\right].
+\end{aligned}
+$$
+Assume the reverse generative model factorizes as
+$$
+\begin{aligned}
+p_\theta(w_{0:T}, x_{0:T})
+& =
+p_{\theta}(x_T)\prod_{t=1}^T p_\theta(x_{t-1} | x_t)\prod_{t=0}^T p_\theta(w_t | x_t) \\
+& =
+p_{\theta}(x_T) p_\theta(w_0 | x_0) p_\theta(x_{0} | x_1) \prod_{t=2}^T p_\theta(x_{t-1} | x_t) \prod_{t=1}^T p_\theta(w_t | x_t) \\
+\end{aligned}
+$$
+and the proposal factorizes as
+$$
+\begin{aligned}
+q(w_{1:T},x_{0:T}\mid w_0)
+&= q(x_{0:T} \mid w_0) q(w_{1:T}\mid x_{0:T},w_0) \\
+&= q(x_0 \mid w_0) q(x_{1:T} | x_0, w_0) \prod_{t=1}^T q(w_t\mid x_{0:T}, w_0, w_{1:t-1}) \\
+&= q(x_0 \mid w_0) \underbrace{q(x_T\mid x_0) \prod_{t=2}^T q(x_{t-1}\mid x_t,x_0)}_{q(x_{1:T} | x_0, w_0) = q(x_T\mid x_0) \prod_{t=2}^T q(x_{t-1}\mid x_t,x_0)} \prod_{t=1}^T q( w_t\mid x_t).
+\end{aligned}
+$$
+Using
+$$
+\begin{aligned}
+q(x_{1:T}\mid x_0)
+& = \prod_{t=1}^T q(x_{t} \mid x_{t-1}) \\
+& = q(x_{1} \mid x_{0}) \prod_{t=2}^T q(x_{t} \mid x_{t-1}) \\
+& = q(x_{1} \mid x_{0}) \left( \prod_{t=2}^T q(x_{t-1} \mid x_{t}, x_0) \frac{q(x_t | x_0)}{q(x_{t-1} | x_0)} \right), \ \because \text{Markov property } q(x_{t} \mid x_{t-1}) = q(x_{t} \mid x_{t-1}, x_0) \\
+& = q(x_{1} \mid x_{0}) \prod_{t=2}^T q(x_{t-1} \mid x_{t}, x_0) \prod_{t=2}^T \frac{q(x_t | x_0)}{q(x_{t-1} | x_0)} \\
+& = q(x_{1} \mid x_{0}) \frac{q(x_T | x_0)}{q(x_{1} | x_0)} \prod_{t=2}^T q(x_{t-1} \mid x_{t}, x_0)  \\
+& = q(x_T\mid x_0) \prod_{t=2}^T q(x_{t-1}\mid x_t,x_0) \\
+\end{aligned}
+$$
+
+the discrete NELBO on the state $w_{t}$ of the Brownian bridge conditioned on $w_0$ is 
+$$
+\begin{aligned}
+\mathcal L_{\mathrm{VLB}}(w_0)
+&=
+\mathbb E_q \Bigg[
+\log q(x_0\mid w_0)-\log p_\theta(w_0\mid x_0)
++
+\sum_{t=1}^T \log \frac{q(w_t\mid x_t)}{p_\theta(w_t\mid x_t)}
+\\
+&\qquad\qquad\qquad
++
+\log \frac{q(x_T\mid x_0)}{p_{\theta}(x_T)}
++
+\sum_{t=2}^T \log \frac{q(x_{t-1}\mid x_t,x_0)}{p_\theta(x_{t-1}\mid x_t)}
+-\log p_\theta(x_0\mid x_1)
+\Bigg]
+\\
+&=
+\underbrace{
+\mathbb E_{q(x_0\mid w_0)}
+D_{\mathrm{KL}}\!\bigl(q(x_T\mid x_0)\,\|\,p(x_T)\bigr)
+}_{\text{Prior}}
++
+\underbrace{
+\sum_{t=2}^T
+\mathbb E_{q(x_t,x_0\mid w_0)}
+D_{\mathrm{KL}}\!\bigl(q(x_{t-1}\mid x_t,x_0)\,\|\,p_\theta(x_{t-1}\mid x_t)\bigr)
+}_{\text{Diffusion}}
+\\
+&\quad+
+\underbrace{
+\mathbb E_{q(x_0,x_1\mid w_0)}
+\bigl[-\log p_\theta(x_0\mid x_1)\bigr]
+}_{\text{Latent reconstruction}}
++
+\underbrace{
+\sum_{t=1}^T
+\mathbb E_{q(x_t\mid w_0)}
+D_{\mathrm{KL}}\!\bigl(q(w_t\mid x_t)\,\|\,p_\theta(w_t\mid x_t)\bigr)
+}_{\text{Future emission matching}}
+\\
+&\quad+
+\underbrace{
+\mathbb E_{q(x_0\mid w_0)}
+\bigl[\log q(x_0\mid w_0)-\log p_\theta(w_0\mid x_0)\bigr]
+}_{\text{Initial inference / observation term}}.
+\end{aligned}
 $$
 ### Poincare Disk Brownian Bridge Diffusion
 Given 2 Brownian bridge $q(x_{0:T} | y), \{x_t\} \subset T_{x_t} \mathbb{D}^d$ and $p_{\theta}(x_{0:T} | y), \{x_t\} \subset T_{x_t} \mathbb{D}^d$ on the local chart of Poincare Disk $\mathbb{D}^d$, and conditioned on a target point $y \in \mathbb{R}^d$ drawn from training dataset $y \in Y$, assume 
@@ -66,12 +161,55 @@ Since $\tau(T) = T \Delta t$ under the uniform-step schedule, the continuous bri
 $$
 \begin{aligned}
 q(x_{\tau(i-1)} \mid x_{\tau(i)}, y)
-& \approx \mathcal{N}\!\big(x_{\tau(i)} - f(\tau(i), x_{\tau(i)}, y) \Delta t,\; g(\tau(i), x_{\tau(i)})^2 \Delta t I\big), \\
+& \approx \mathcal{N}\!\big(x_{\tau(i)} + f(\tau(i), x_{\tau(i)}, y) \Delta t,\; g(\tau(i), x_{\tau(i)})^2 \Delta t I\big), \\
 p_\theta(x_{\tau(i-1)} \mid x_{\tau(i)})
-& \approx \mathcal{N}\!\big(x_{\tau(i)} - f(\tau(i), x_{\tau(i)}, f_\theta(x_{\tau(i)}, \tau(i))) \Delta t,\; g(\tau(i), x_{\tau(i)})^2 \Delta t I\big).
+& \approx \mathcal{N}\!\big(x_{\tau(i)} + f(\tau(i), x_{\tau(i)}, f_\theta(x_{\tau(i)}, \tau(i))) \Delta t,\; g(\tau(i), x_{\tau(i)})^2 \Delta t I\big).
 \end{aligned}
 $$
-where $f(t, x_t, y) = \frac{d-1}{2} \frac{(1-\|x_t\|^2)^2}{\|y-x_t\|^2} (y-x_t) - \frac{d}{4} (1-\|x_t\|^2) x_t$ and $g(t, x_t) = \frac{1-\|x_t\|^2}{2}$.
+where $f(t, x_t, y) = \frac{d-1}{2} \frac{(1-\|x_t\|^2)^2}{\|y-x_t\|^2} (y-x_t) - \frac{d}{4} (1-\|x_t\|^2) x_t$ and $g(t, x_t) = \frac{1-\|x_t\|^2}{2}$. Under this reverse-time bridge convention, the one-step map from the noisier state $x_{\tau(i)}$ to the cleaner state $x_{\tau(i-1)}$ uses the $+ f(\tau(i), x_{\tau(i)}, \cdot)\Delta t$ mean shown above, and the reconstruction residual is therefore $y - x_{\tau(1)} - f(\tau(1), x_{\tau(1)}, \cdot)\Delta t$.
+### Poincare Disk Brownian Bridge Diffusion on Simplex Space
+According to the Diffusion Duality paper, the discrete ELBO provided in the paper is evaluating the Argmax Gaussian diffusion on the USDM ELBO. However, it requires equivalent marginal distribution between USDM and Argmax Gaussian diffusion with linear drift $\alpha(t) x_t$. The drift of Poincare Disk Brownian Bridge Diffusion doesn't satisfy this criteria.
+
+Therefore, we apply Ito's lemma to derive the dynamic of the bridge on the simplex space with ``softmax`` function. Based on Ito's lemma, given a bridge SDE $d x_t = \bar{\mu}(t, x_t, y) dt + \bar{\sigma}(t, x_t) d \bar{W}_t$ conditioned on target $y \in \mathbb{R}^d$, where $x_t \in \mathbb{R}^d$, drift $\bar{\mu}: \mathbb{R} \times \mathbb{R}^d \times \mathbb{R}^d \to \mathbb{R}^d$, and diffusion $\bar{\sigma}: \mathbb{R} \times \mathbb{R}^d \to \mathbb{R}^{d \times d}$, the dynamic of $h_{\mathcal{T}}(x_t) := softmax(\frac{E x_t}{\mathcal{T}}), E \in \mathbb{R}^{K \times d}$ is
+$$
+\begin{aligned}
+d h_{\mathcal{T}}(x_t) 
+=  \left[ J_h(x_t) \bar{\mu}(t, x_t, y) + \frac{1}{2} b_{Ito}(t, x_t) \right] dt + J_h(x_t) \bar{\sigma}(t, x_t) d \bar{W}_t
+\end{aligned}
+$$
+where 
+- $J_h(x_t) = \frac{1}{\mathcal{T}} \left( \text{Diag}(h_{\mathcal{T}}(x_t)) - h_{\mathcal{T}}(x_t) h_{\mathcal{T}}(x_t)^{\top} \right) E$ is the Jacobian matrix of the temperature softmax.
+- $\Sigma(t, x_t) = \bar{\sigma}(t, x_t) \bar{\sigma}(t, x_t)^T$ is the covariance (diffusion) tensor.
+- $[b_{Ito}(t, x_t)]_k = Tr(\Sigma(t, x_t) \nabla_{x_t}^2 [h_{\mathcal{T}}(x_t)]_{k})$ is the $k$-th component of Ito correction $k = 1, \dots,  K$
+
+Then, we can derive the Poincare disk Brownian bridge on simplex space as
+$$
+\begin{aligned}
+d h_{\mathcal{T}}(x_t) 
+= J_h(x_t) \left[ f(t, x_t, y) + \frac{(d - 2) g^2(t, x_t)}{2\mathcal{T}} y_t \right] dt + J_h(x_t) g(t, x_t) d \bar{W}_t
+\end{aligned}
+$$
+where 
+- $f(t, x_t, y) = \frac{d-1}{2} \frac{(1-\|x_t\|^2)^2}{\|y-x_t\|^2} (y-x_t) - \frac{d}{4} (1-\|x_t\|^2) x_t$, which is the same as the Brownian bridge in continuous space
+- $g(t, x_t) =  \frac{1-\|x_t\|^2}{2}$, which is the same as the Brownian bridge in continuous space
+- $J_h(x_t) = \frac{1}{\mathcal{T}} \left( \text{diag}(h(x_t)) - h(x_t) h(x_t)^{\top} \right)$
+Additionally, to get the bridge learned by the model $f_{\theta}$ on simplex space, just plug-in $y=f_{\theta}(x_t, t)$, yielding
+$$
+\begin{aligned}
+d h_{\mathcal{T}}(x_t) 
+= J_h(x_t) \left[ f(t, x_t, f_{\theta}(x_t, t)) + \frac{(d - 2) g^2(t, x_t)}{2\mathcal{T}} y_t \right] dt + J_h(x_t) g(t, x_t) d \bar{W}_t
+\end{aligned}
+$$
+ Then the local Euler-Gaussian approximation of the one-step posterior on simplex space is
+$$
+\begin{aligned}
+q(h_{\mathcal{T}}(x_{\tau(i-1)}) \mid x_{\tau(i)}, y)
+& \approx \mathcal{N} \big(h_{\mathcal{T}}(x_{\tau(i)}) + \hat{f}(\tau(i), x_{\tau(i)}, y) \Delta t, \hat{g}(\tau(i), x_{\tau(i)})^2 \Delta t I\big), \\
+p_\theta(h_{\mathcal{T}}(x_{\tau(i-1)}) \mid x_{\tau(i)})
+& \approx \mathcal{N} \big(h_{\mathcal{T}}(x_{\tau(i)}) + \hat{f}(\tau(i), x_{\tau(i)}, f_\theta(x_{\tau(i)}, \tau(i))) \Delta t,\; \hat{g}(\tau(i), x_{\tau(i)})^2 \Delta t I\big).
+\end{aligned}
+$$
+where $\hat{f}(t, x_t, y) = J_h(x_t) \left[ f(t, x_t, f_{\theta}(x_t, t)) + \frac{(d - 2) g^2(t, x_t)}{2\mathcal{T}} y_t \right]$ and $\hat{g}(t, x_t) = J_h(x_t) g(t, x_t)$.
 ### Local-Chart Approximated NELBO in Continuous Space with Small Step
 This derivation is a local-chart, small-step approximate NELBO induced by the Euler-Gaussian approximation above; it is not the exact manifold ELBO. The resulting approximation to the NLL $-\log p_{\theta}(y)$ is
 $$
@@ -99,7 +237,7 @@ L_0
 + d \log g(\tau(1), x_{\tau(1)})
 + \frac{d}{2} \log \Delta t
 + \frac{1}{2 g(\tau(1), x_{\tau(1)})^2 \Delta t}
-\Big\| y - x_{\tau(1)} + f(\tau(1), x_{\tau(1)}, f_\theta(x_{\tau(1)}, \tau(1))) \Delta t \Big\|^2
+\Big\| y - x_{\tau(1)} - f(\tau(1), x_{\tau(1)}, f_\theta(x_{\tau(1)}, \tau(1))) \Delta t \Big\|^2
 \right].
 \end{aligned}
 $$
@@ -158,8 +296,8 @@ $$
 D_{\mathrm{KL}}(q \parallel p_\theta) 
 & = \frac{1}{2 g(\tau(i), x_{\tau(i)})^2 \Delta t}
 \Big\|
-\big(x_{\tau(i)} - f(\tau(i), x_{\tau(i)}, f_\theta(x_{\tau(i)}, \tau(i))) \Delta t\big)
-- \big(x_{\tau(i)} - f(\tau(i), x_{\tau(i)}, y) \Delta t\big)
+\big(x_{\tau(i)} + f(\tau(i), x_{\tau(i)}, f_\theta(x_{\tau(i)}, \tau(i))) \Delta t\big)
+- \big(x_{\tau(i)} + f(\tau(i), x_{\tau(i)}, y) \Delta t\big)
 \Big\|^2 \\
 & = \frac{\Delta t}{2 g(\tau(i), x_{\tau(i)})^2}
 \Big\| f(\tau(i), x_{\tau(i)}, y) - f(\tau(i), x_{\tau(i)}, f_\theta(x_{\tau(i)}, \tau(i))) \Big\|^2 \\
@@ -183,7 +321,7 @@ Consider the multivariate Gaussian distribution as
 $$
 \mathcal N(y;\mu,\Sigma) = \frac{1}{(2\pi)^{d/2}\det(\Sigma)^{1/2}} \exp\!\left( -\frac12 (y-\mu)^\top \Sigma^{-1}(y-\mu) \right).
 $$
-As we assume the distribution is a isotropic Gaussian, the negative log is
+As we assume the distribution is a isotropic Gaussian with variance $\sigma^2$, the negative log is
 $$
 \begin{aligned}
 - \log \mathcal N(y;\mu, \sigma^2 I)
@@ -195,18 +333,18 @@ Therefore, the reconst term should be
 $$
 \begin{aligned}
 - \log p_\theta(y \vert x_{\tau(1)})
-& = - \log \mathcal{N}\!\big(y;\, x_{\tau(1)} - f(\tau(1), x_{\tau(1)}, f_{\theta}(x_{\tau(1)}, \tau(1))) \Delta t,\; g(\tau(1), x_{\tau(1)})^2 \Delta t I\big) \\
+& = - \log \mathcal{N}\!\big(y;\, x_{\tau(1)} + f(\tau(1), x_{\tau(1)}, f_{\theta}(x_{\tau(1)}, \tau(1))) \Delta t,\; g(\tau(1), x_{\tau(1)})^2 \Delta t I\big) \\
 & = \frac{d}{2} \log 2 \pi
 + d \log g(\tau(1), x_{\tau(1)})
 + \frac{d}{2} \log \Delta t \\
 & \quad + \frac{1}{2 g(\tau(1), x_{\tau(1)})^2 \Delta t}
-\Big\| y - x_{\tau(1)} + f(\tau(1), x_{\tau(1)}, f_{\theta}(x_{\tau(1)}, \tau(1))) \Delta t \Big\|^2 \\
+\Big\| y - x_{\tau(1)} - f(\tau(1), x_{\tau(1)}, f_{\theta}(x_{\tau(1)}, \tau(1))) \Delta t \Big\|^2 \\
 & = \frac{d}{2} \log 2 \pi 
 + d \log \left( \frac{1-\|x_{\tau(1)}\|^2}{2} \right)
 + \frac{d}{2} \log \Delta t \\
 & \quad + \frac{2}{(1-\|x_{\tau(1)}\|^2)^2 \Delta t}
 \Bigg\| y - x_{\tau(1)}
-+ \Bigg(
+- \Bigg(
 \frac{d-1}{2}
 \frac{(1-\|x_{\tau(1)}\|^2)^2}{\|f_{\theta}(x_{\tau(1)}, \tau(1)) - x_{\tau(1)}\|^2}
 \big(f_{\theta}(x_{\tau(1)}, \tau(1)) - x_{\tau(1)}\big)
@@ -215,7 +353,7 @@ $$
 \end{aligned}
 $$
 ### Local-Chart Approximated NELBO in Discrete Space with Small Step
-This derivation is a local-chart, small-step approximate NELBO induced by the Euler-Gaussian approximation above together with the discrete projection $x_t' = \arg \max(x_t E^{\top})$; it is not the exact manifold ELBO on discrete states. Let
+This derivation is a local-chart, small-step approximate NELBO induced by the Euler-Gaussian approximation above together with the discrete projection $w_t = softmax(\frac{E x_t}{\mathcal{T}})$; it is not the exact manifold ELBO on discrete states. Let
 $$
 \ell_{\tau(i-1)} := x_{\tau(i-1)} E^{\top} \in \mathbb{R}^{K}.
 $$
@@ -423,7 +561,7 @@ $$
 + \frac{d}{2} \log \Delta t
 + \frac{2}{(1-\|x_{\tau(1)}\|^2)^2 \Delta t}
 \Bigg\| y - x_{\tau(1)}
-+ \Bigg(
+- \Bigg(
 \frac{d-1}{2}
 \frac{(1-\|x_{\tau(1)}\|^2)^2}{\|\hat{y}_{\theta,1} - x_{\tau(1)}\|^2}
 \big(\hat{y}_{\theta,1} - x_{\tau(1)}\big)
@@ -453,7 +591,7 @@ For each data point $y \in Y, y \in \mathbb{R}^{d}$ drawn from the training data
 $$
 x_{\tau(i-1)} =
 x_{\tau(i)}
-- f(\tau(i), x_{\tau(i)}, y) \Delta \tau_i
++ f(\tau(i), x_{\tau(i)}, y) \Delta \tau_i
 + g(\tau(i), x_{\tau(i)}) \sqrt{\Delta \tau_i}\,\varepsilon_i,
 \qquad \varepsilon_i \sim \mathcal N(0, I).
 $$
@@ -511,7 +649,7 @@ $$
 + \frac{d}{2} \log \Delta \tau_1
 + \frac{2}{(1-\|x_{\tau(1)}\|^2)^2 \Delta \tau_1}
 \Bigg\| y - x_{\tau(1)}
-+ \Bigg(
+- \Bigg(
 \frac{d-1}{2}
 \frac{(1-\|x_{\tau(1)}\|^2)^2}{\|\hat{y}_{\theta,1} - x_{\tau(1)}\|^2}
 \big(\hat{y}_{\theta,1} - x_{\tau(1)}\big)
@@ -534,7 +672,7 @@ $$
 x_{\tau(i-1)}'
 & =
 x_{\tau(i)}'
-- \left(
++ \left(
 \frac{d-1}{2}
 \frac{(1-\|x_{\tau(i)}'\|^2)^2}{\|\hat{y}_i-x_{\tau(i)}'\|^2}
 (\hat{y}_i-x_{\tau(i)}')

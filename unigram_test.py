@@ -33,7 +33,6 @@ import lightning as L
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -50,11 +49,91 @@ class ExperimentConfig:
   hyper_dim: int = 2
   hyper_T: int = 1000
   hyper_dt: float = 0.01
+  hyper_embed_length: float = 0.99
   p_a: float = 0.8
   seed: int = 0
   num_workers: int = 0
   history_every: int = 10
+  proposal: str = "fixed_interval"
+  proposal_start: float | None = None
+  proposal_end: float | None = None
+  proposal_exp_lambda: float = 1.0
+  inference_dt: float = 0.01
   plot_path: str = "unigram_test.png"
+
+
+@dataclass
+class ProposalSchedule:
+  tau: torch.Tensor
+  delta_tau: torch.Tensor
+
+
+class ProposalGenerator:
+  """Build the reverse-time schedule used by training and inference."""
+
+  def __init__(self, num_steps: int, mode: str,
+               start: float, end: float, exp_lambda: float = 1.0):
+    if num_steps < 1:
+      raise ValueError("num_steps must be >= 1")
+    if mode not in {"fixed_interval", "uniform", "exponential"}:
+      raise ValueError(f"Unsupported proposal mode: {mode}")
+    if start <= 0:
+      raise ValueError("Proposal start must be > 0")
+    if end < start:
+      raise ValueError("Proposal end must be >= proposal start")
+    if exp_lambda <= 0:
+      raise ValueError("Exponential proposal rate must be > 0")
+    self.num_steps = num_steps
+    self.mode = mode
+    self.start = start
+    self.end = end
+    self.exp_lambda = exp_lambda
+
+  @classmethod
+  def from_config(cls, config: ExperimentConfig):
+    start = config.hyper_dt if config.proposal_start is None else config.proposal_start
+    end = (config.hyper_T * config.hyper_dt
+           if config.proposal_end is None else config.proposal_end)
+    return cls(
+      num_steps=config.hyper_T,
+      mode=config.proposal,
+      start=start,
+      end=end,
+      exp_lambda=config.proposal_exp_lambda)
+
+  @classmethod
+  def fixed_step(cls, num_steps: int, delta_tau: float):
+    return cls(
+      num_steps=num_steps,
+      mode="fixed_interval",
+      start=delta_tau,
+      end=num_steps * delta_tau)
+
+  def _quantile_grid(self, device: torch.device, dtype: torch.dtype):
+    return (torch.arange(1, self.num_steps + 1, device=device, dtype=dtype)
+            / self.num_steps)
+
+  def _generate_tau(self, device: torch.device, dtype: torch.dtype):
+    if self.mode == "fixed_interval":
+      tau = torch.linspace(
+        self.start, self.end, steps=self.num_steps,
+        device=device, dtype=dtype)
+    elif self.mode == "uniform":
+      quantiles = self._quantile_grid(device, dtype)
+      tau = self.start + (self.end - self.start) * quantiles
+    else:
+      quantiles = self._quantile_grid(device, dtype).clamp(max=1 - 1e-6)
+      tau = -torch.log1p(-quantiles) / self.exp_lambda
+    return tau.sort().values
+
+  def generate(self, device: torch.device | None = None,
+               dtype: torch.dtype = torch.float32):
+    if device is None:
+      device = torch.device("cpu")
+    tau = self._generate_tau(device, dtype)
+    tau0 = torch.cat([tau.new_zeros(1), tau], dim=0)
+    delta_tau = tau0[1:] - tau0[:-1]
+    return ProposalSchedule(tau=tau, delta_tau=delta_tau)
 
 
 class UnigramDataset(Dataset):
@@ -134,26 +213,38 @@ class SmallMLP(nn.Module):
 
 
 class HyperbolicBridge(nn.Module):
-  """Hyperbolic bridge utilities from ``hyper_dm.md``."""
+  """Hyperbolic bridge utilities on the Poincare disk."""
 
-  def __init__(self, hyper_dim: int, hyper_T: int, hyper_dt: float):
+  def __init__(self, hyper_dim: int, hyper_embed_length: float=1.0):
     super().__init__()
     assert hyper_dim >= 2
     self.hyper_dim = hyper_dim
-    self.hyper_T = hyper_T
-    self.hyper_dt = hyper_dt
+    self.hyper_embed_length = hyper_embed_length
 
     endpoints = torch.zeros(2, hyper_dim, dtype=torch.float32)
-    endpoints[0, 0] = 1.0
-    endpoints[1, 0] = -1.0
+    endpoints[0, 0] = self.hyper_embed_length
+    endpoints[1, 0] = - self.hyper_embed_length
     self.register_buffer("endpoints", endpoints, persistent=False)
 
   def normalize_endpoint(self, endpoint: torch.Tensor):
-    return endpoint / endpoint.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+    return endpoint / endpoint.norm(dim=-1, keepdim=True).clamp(min=1e-8) * self.hyper_embed_length
 
   def endpoint_posterior(self, endpoint: torch.Tensor):
     endpoint = self.normalize_endpoint(endpoint)
     return (endpoint @ self.endpoints.t()).softmax(dim=-1)
+
+  def project_to_discrete(self, endpoint: torch.Tensor):
+    return (endpoint @ self.endpoints.t()).argmax(dim=-1)
+
+  def clamp_to_ball(self, z: torch.Tensor):
+    znorm = z.norm(dim=-1, keepdim=True).clamp(min=1e-32)
+    return z * (znorm.clamp(max=self.hyper_embed_length) / znorm)
+
+  def _expand_like_state(self, value: torch.Tensor | float, z: torch.Tensor):
+    value = torch.as_tensor(value, device=z.device, dtype=z.dtype)
+    while value.ndim < z.ndim:
+      value = value.unsqueeze(-1)
+    return value
 
   def drift(self, z: torch.Tensor, y: torch.Tensor):
     conf = (1 - z.square().sum(dim=-1, keepdim=True)).clamp(min=1e-8)
@@ -167,30 +258,26 @@ class HyperbolicBridge(nn.Module):
     conf = (1 - z.square().sum(dim=-1, keepdim=True)).clamp(min=1e-8)
     return conf / 2
 
-  def sample_states(self, y: torch.Tensor, tau_steps: torch.Tensor):
-    """Sample x_{tau(i)} using forward EM, as in vis_hyper_bridge.py."""
-    forward_steps = (self.hyper_T - tau_steps).clamp(
-      min=0, max=self.hyper_T).to(dtype=torch.long)
-    z = torch.zeros_like(y, dtype=torch.float64)
-    y64 = y.to(torch.float64)
-    max_steps = int(forward_steps.max().item())
-    if max_steps == 0:
-      return z.to(torch.float32)
+  def bridge_step(self, z: torch.Tensor, y: torch.Tensor,
+                  delta_tau: torch.Tensor | float):
+    delta_tau = self._expand_like_state(delta_tau, z)
+    drift = self.drift(z, y)
+    noise = self.diffusion(z) * delta_tau.sqrt() * torch.randn_like(z)
+    return self.clamp_to_ball(z + drift * delta_tau + noise)
 
-    dt_t = torch.tensor(self.hyper_dt, dtype=torch.float64, device=y.device)
-    sqrt_dt = math.sqrt(self.hyper_dt)
-    for step in range(max_steps):
-      active = (step < forward_steps)[:, None]
-      drift = self.drift(z, y64)
-      noise = self.diffusion(z) * sqrt_dt * torch.randn_like(z)
-      z_next = z + drift * dt_t + noise
-      znorm = z_next.norm(dim=-1, keepdim=True).clamp(min=1e-32)
-      z_next = z_next * (znorm.clamp(max=0.9999) / znorm)
-      z = torch.where(active, z_next, z)
-    return z.to(torch.float32)
+  def sample_reverse_path(self, y: torch.Tensor, schedule: ProposalSchedule):
+    """Simulate q(x_{tau(i)} | y) marginals with x_{tau(T)} = 0."""
+    y64 = self.normalize_endpoint(y).to(torch.float64)
+    z = torch.zeros_like(y64)
+    states = [None] * (schedule.delta_tau.numel() + 1)
+    states[-1] = z.to(torch.float32)
+    for idx in range(schedule.delta_tau.numel() - 1, -1, -1):
+      z = self.bridge_step(z, y64, schedule.delta_tau[idx])
+      states[idx] = z.to(torch.float32)
+    return torch.stack(states, dim=1)
 
   def diffusion_term(self, z: torch.Tensor, y: torch.Tensor,
-                     pred: torch.Tensor):
+                     pred: torch.Tensor, delta_tau: torch.Tensor | float):
     pred_n = self.normalize_endpoint(pred)
     diff_y = y - z
     diff_pred = pred_n - z
@@ -199,26 +286,29 @@ class HyperbolicBridge(nn.Module):
                 / diff_pred.square().sum(dim=-1, keepdim=True).clamp(min=1e-8))
     conf = (1 - z.square().sum(dim=-1)).clamp(min=1e-8)
     error = (dir_y - dir_pred).square().sum(dim=-1)
-    return (0.5 * self.hyper_dt * (self.hyper_dim - 1) ** 2
+    delta_tau = torch.as_tensor(delta_tau, device=z.device, dtype=z.dtype)
+    return (0.5 * delta_tau * (self.hyper_dim - 1) ** 2
             * conf.square() * error)
 
   def reconstruction_term(self, z: torch.Tensor, y: torch.Tensor,
-                          pred: torch.Tensor):
+                          pred: torch.Tensor,
+                          delta_tau: torch.Tensor | float):
     pred_n = self.normalize_endpoint(pred)
     conf = (1 - z.square().sum(dim=-1, keepdim=True)).clamp(min=1e-8)
     diff_pred = pred_n - z
     sq_diff = diff_pred.square().sum(dim=-1, keepdim=True).clamp(min=1e-8)
     drift = (((self.hyper_dim - 1) / 2) * conf.square() / sq_diff * diff_pred
              - (self.hyper_dim / 4) * conf * z)
-    residual = y - z + drift * self.hyper_dt
+    delta_tau_state = self._expand_like_state(delta_tau, z)
+    residual = y - z - drift * delta_tau_state
 
-    log_dt = z.new_tensor(self.hyper_dt).log()
+    log_dt = torch.as_tensor(delta_tau, device=z.device, dtype=z.dtype).log()
     log_2pi = z.new_tensor(2 * math.pi).log()
     normalizer = (
       0.5 * self.hyper_dim * log_2pi
       + self.hyper_dim * (conf / 2).log().squeeze(-1)
       + 0.5 * self.hyper_dim * log_dt)
-    quad = (2.0 / (conf.square() * self.hyper_dt)
+    quad = (2.0 / (conf.square() * delta_tau_state)
             * residual.square().sum(dim=-1, keepdim=True))
     return normalizer + quad.squeeze(-1)
 
@@ -232,10 +322,11 @@ class UnigramHyperbolicDLM(L.LightningModule):
     super().__init__()
     self.save_hyperparameters(asdict(config))
     self.config = config
-    self.bridge = HyperbolicBridge(
-      hyper_dim=config.hyper_dim,
-      hyper_T=config.hyper_T,
-      hyper_dt=config.hyper_dt)
+    self.bridge = HyperbolicBridge(hyper_dim=config.hyper_dim, hyper_embed_length=config.hyper_embed_length)
+    self.proposal_generator = ProposalGenerator.from_config(config)
+    self.inference_generator = ProposalGenerator.fixed_step(
+      num_steps=config.hyper_T,
+      delta_tau=config.inference_dt)
     self.model = SmallMLP(
       input_dim=config.hyper_dim + 1,
       hidden_size=config.hidden_size,
@@ -270,11 +361,12 @@ class UnigramHyperbolicDLM(L.LightningModule):
   def configure_optimizers(self):
     return torch.optim.Adam(self.parameters(), lr=self.config.lr)
 
-  def _time_from_tau(self, tau_steps: torch.Tensor):
-    return tau_steps.to(dtype=torch.float32, device=self.device) * self.config.hyper_dt
+  def _time_from_tau(self, tau: torch.Tensor):
+    return tau.to(dtype=torch.float32, device=self.device)
 
   def _reconstruction_residual_terms(self, z: torch.Tensor, y: torch.Tensor,
-                                     pred: torch.Tensor):
+                                     pred: torch.Tensor,
+                                     delta_tau: torch.Tensor | float):
     pred_n = self.bridge.normalize_endpoint(pred)
     conf = (1 - z.square().sum(dim=-1, keepdim=True)).clamp(min=1e-8)
     diff = pred_n - z
@@ -282,37 +374,60 @@ class UnigramHyperbolicDLM(L.LightningModule):
     drift = (((self.config.hyper_dim - 1) / 2)
              * conf.square() / sq_diff * diff
              - (self.config.hyper_dim / 4) * conf * z)
-    residual = y - z + drift * self.config.hyper_dt
+    delta_tau = torch.as_tensor(delta_tau, device=z.device, dtype=z.dtype)
+    residual = y - z - drift * delta_tau
     return pred_n, conf, diff, residual
+
+  def _proposal_schedule(self):
+    return self.proposal_generator.generate(device=self.device)
+
+  def _inference_schedule(self):
+    return self.inference_generator.generate(device=self.device)
+
+  def _predict_boundary(self, z: torch.Tensor, tau: torch.Tensor):
+    flat_z = z.reshape(-1, z.shape[-1])
+    flat_tau = self._time_from_tau(tau).reshape(-1)
+    pred = self.model(flat_z, flat_tau)
+    return pred.reshape(*z.shape[:-1], -1)
+
+  def _prepare_targets(self, tokens: torch.Tensor):
+    y = self.bridge.normalize_endpoint(self.bridge.endpoints[tokens])
+    discrete = self.bridge.project_to_discrete(y)
+    return y, discrete
 
   def _compute_losses(self, tokens: torch.Tensor):
     tokens = tokens.to(dtype=torch.long, device=self.device)
-    y = self.bridge.endpoints[tokens]
+    y, discrete_tokens = self._prepare_targets(tokens)
     batch_size = tokens.shape[0]
+    schedule = self._proposal_schedule()
+    with torch.no_grad():
+      states = self.bridge.sample_reverse_path(y, schedule)
 
-    tau_diff = torch.randint(
-      2, self.config.hyper_T + 1, (batch_size,), device=self.device)
-    t_diff = self._time_from_tau(tau_diff)
-    z_diff = self.bridge.sample_states(y, tau_diff)
-    pred_diff = self.model(z_diff, t_diff)
+    z_diff = states[:, 2:, :]
+    tau_diff = schedule.tau[1:].expand(batch_size, -1)
+    y_diff = y[:, None, :].expand_as(z_diff)
+    pred_diff = self._predict_boundary(z_diff, tau_diff)
+    posterior_diff = self.bridge.endpoint_posterior(pred_diff).clamp(min=1e-8)
+    ce = -posterior_diff.log().gather(
+      -1,
+      discrete_tokens[:, None, None].expand(-1, z_diff.shape[1], 1),
+    ).squeeze(-1).sum(dim=-1)
+    l2 = (pred_diff - y_diff).square().sum(dim=-1).sum(dim=-1)
+    diffusion = self.bridge.diffusion_term(
+      z_diff, y_diff, pred_diff, schedule.delta_tau[1:]).sum(dim=-1)
 
-    ce = F.nll_loss(
-      self.bridge.endpoint_posterior(pred_diff).clamp(min=1e-8).log(),
-      tokens, reduction="none")
-    l2 = (pred_diff - y).square().sum(dim=-1)
-    diffusion = ((self.config.hyper_T - 1)
-                 * self.bridge.diffusion_term(z_diff, y, pred_diff))
-
-    tau_recon = torch.ones(batch_size, dtype=torch.long, device=self.device)
-    t_recon = self._time_from_tau(tau_recon)
-    z_recon = self.bridge.sample_states(y, tau_recon)
-    pred_recon = self.model(z_recon, t_recon)
-    recon = self.bridge.reconstruction_term(z_recon, y, pred_recon)
+    z_recon = states[:, 1, :]
+    tau_recon = schedule.tau[0].expand(batch_size)
+    delta_tau_recon = schedule.delta_tau[0]
+    pred_recon = self._predict_boundary(z_recon, tau_recon)
+    recon = self.bridge.reconstruction_term(
+      z_recon, y, pred_recon, delta_tau_recon)
     _, recon_conf, recon_diff, recon_residual = (
-      self._reconstruction_residual_terms(z_recon, y, pred_recon))
+      self._reconstruction_residual_terms(
+        z_recon, y, pred_recon, delta_tau_recon))
     recon_conf_sq = recon_conf.squeeze(-1).square()
     recon_last_step = recon_diff.square().sum(dim=-1)
-    horocycle_scale = 2.0 / (recon_conf_sq * self.config.hyper_dt)
+    horocycle_scale = 2.0 / (recon_conf_sq * delta_tau_recon)
     last_step_diffusion = horocycle_scale * recon_residual.square().sum(dim=-1)
     prior = self.bridge.prior_term(batch_size, self.device)
     nelbo = prior + diffusion + recon
@@ -328,6 +443,25 @@ class UnigramHyperbolicDLM(L.LightningModule):
       "recon_last_step": recon_last_step,
       "horocycle_scale": horocycle_scale,
       "last_step_diffusion": last_step_diffusion,
+    }
+
+  @torch.no_grad()
+  def generate_samples(self, num_samples: int):
+    schedule = self._inference_schedule()
+    z = torch.zeros(
+      num_samples, self.config.hyper_dim,
+      device=self.device, dtype=torch.float64)
+
+    for idx in range(self.config.hyper_T - 1, -1, -1):
+      tau_t = schedule.tau[idx].expand(num_samples)
+      pred = self._predict_boundary(z.float(), tau_t)
+      boundary = self.bridge.normalize_endpoint(pred).to(torch.float64)
+      z = self.bridge.bridge_step(z, boundary, schedule.delta_tau[idx])
+
+    final_boundary = self.bridge.normalize_endpoint(z.float())
+    return {
+      "boundary": final_boundary,
+      "tokens": self.bridge.project_to_discrete(final_boundary),
     }
 
   def training_step(self, batch: torch.Tensor, batch_idx: int):
@@ -595,14 +729,14 @@ def plot_history(model: UnigramHyperbolicDLM, output_path: Path):
   scale_ax.set_xlabel("Optimization step")
   scale_ax.set_ylabel("Value")
   scale_ax.set_title(
-    r"Horocycle Scale $\frac{2}{(1-\|x_{\tau(1)}\|^2)^2 \Delta t}$")
+    r"Horocycle Scale $\frac{2}{(1-\|x_{\tau(1)}\|^2)^2 \Delta \tau_1}$")
   scale_ax.grid(alpha=0.2)
   scale_ax.legend()
 
   last_step_ax.set_xlabel("Optimization step")
   last_step_ax.set_ylabel("Value")
   last_step_ax.set_title(
-    r"Last-Step Diffusion $\frac{2}{(1-\|x_{\tau(1)}\|^2)^2 \Delta t}\|\mathrm{residual}\|^2$")
+    r"Last-Step Diffusion $\frac{2}{(1-\|x_{\tau(1)}\|^2)^2 \Delta \tau_1}\|\mathrm{residual}\|^2$")
   last_step_ax.grid(alpha=0.2)
   last_step_ax.legend()
 
@@ -621,16 +755,23 @@ def parse_args():
   parser.add_argument("--val-size", type=int, default=4_000)
   parser.add_argument("--batch-size", type=int, default=256)
   parser.add_argument("--max-steps", type=int, default=2_000)
-  parser.add_argument("--lr", type=float, default=1e-3)
+  parser.add_argument("--lr", type=float, default=1e-4)
   parser.add_argument("--hidden-size", type=int, default=64)
   parser.add_argument("--depth", type=int, default=2)
   parser.add_argument("--hyper-dim", type=int, default=2)
   parser.add_argument("--hyper-T", type=int, default=1000)
   parser.add_argument("--hyper-dt", type=float, default=0.01)
+  parser.add_argument("--proposal",
+                      choices=["fixed_interval", "uniform", "exponential"],
+                      default="fixed_interval")
+  parser.add_argument("--proposal-start", type=float, default=None)
+  parser.add_argument("--proposal-end", type=float, default=None)
+  parser.add_argument("--proposal-exp-lambda", type=float, default=1.0)
+  parser.add_argument("--inference-dt", type=float, default=0.03)
   parser.add_argument("--p-a", type=float, default=0.8)
   parser.add_argument("--seed", type=int, default=0)
   parser.add_argument("--num-workers", type=int, default=0)
-  parser.add_argument("--history-every", type=int, default=10)
+  parser.add_argument("--history-every", type=int, default=1)
   parser.add_argument("--plot-path", type=str, default="unigram_test.png")
   return parser.parse_args()
 
@@ -649,6 +790,11 @@ def main():
     hyper_dim=args.hyper_dim,
     hyper_T=args.hyper_T,
     hyper_dt=args.hyper_dt,
+    proposal=args.proposal,
+    proposal_start=args.proposal_start,
+    proposal_end=args.proposal_end,
+    proposal_exp_lambda=args.proposal_exp_lambda,
+    inference_dt=args.inference_dt,
     p_a=args.p_a,
     seed=args.seed,
     num_workers=args.num_workers,
@@ -659,12 +805,18 @@ def main():
 
   datamodule = UnigramDataModule(config)
   model = UnigramHyperbolicDLM(config)
+  train_schedule = model.proposal_generator.generate()
 
   print("Running hyperbolic unigram test")
   print(f"  Loss: {config.loss}")
   print(f"  Dataset entropy: {model.entropy_nats:.6f} nats")
   print(f"  P(A)={config.p_a:.2f}, P(B)={1 - config.p_a:.2f}")
-  print(f"  hyper_T={config.hyper_T}, hyper_dt={config.hyper_dt}")
+  print(f"  hyper_T={config.hyper_T}, base hyper_dt={config.hyper_dt}")
+  print(
+    f"  proposal={config.proposal}, "
+    f"tau(1)={train_schedule.tau[0].item():.4f}, "
+    f"tau(T)={train_schedule.tau[-1].item():.4f}")
+  print(f"  inference_dt={config.inference_dt}")
 
   trainer = L.Trainer(
     accelerator="auto",
