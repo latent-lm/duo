@@ -451,6 +451,30 @@ class HyperbolicBridge(nn.Module):
             delta_tau = delta_tau.unsqueeze(0)
         return delta_tau.unsqueeze(-1)
 
+    def _local_chart_transition_moments(
+        self, z: torch.Tensor, y: torch.Tensor, delta_tau: torch.Tensor | float
+    ):
+        delta_tau_state = self._expand_transition_step(delta_tau, z)
+        y = self.normalize_endpoint(y)
+        mean_state = z + self.drift(z, y) * delta_tau_state
+        state_var = self.diffusion(z).square() * delta_tau_state
+        return mean_state, state_var
+
+    def _logit_moments_from_state_moments(
+        self, mean_state: torch.Tensor, state_var: torch.Tensor
+    ):
+        logits_mean = self.discrete_logits(mean_state)
+        endpoint_sq_norm = self.endpoints.square().sum(dim=-1).to(
+            device=mean_state.device, dtype=mean_state.dtype
+        )
+        view_shape = (1,) * (mean_state.ndim - 1) + (endpoint_sq_norm.numel(),)
+        logits_var = (
+            state_var
+            * endpoint_sq_norm.view(view_shape)
+            / (self.discrete_temperature**2)
+        )
+        return logits_mean, logits_var
+
     def _sample_transition(
         self,
         z: torch.Tensor,
@@ -458,16 +482,10 @@ class HyperbolicBridge(nn.Module):
         delta_tau: torch.Tensor | float,
         num_samples: int,
     ):
-        z_samples = z.unsqueeze(0).expand(num_samples, *z.shape)
-        y_samples = y.unsqueeze(0).expand_as(z_samples)
-        delta_tau_state = self._expand_transition_step(delta_tau, z).unsqueeze(0)
-        drift = self.drift(z_samples, y_samples)
-        noise = (
-            self.diffusion(z_samples)
-            * delta_tau_state.sqrt()
-            * torch.randn_like(z_samples)
-        )
-        return self.clamp_to_ball(z_samples + drift * delta_tau_state + noise)
+        del num_samples
+        # The local-chart discrete NELBO uses analytic Gaussian moments
+        # of the one-step transition instead of Monte Carlo samples.
+        return self._local_chart_transition_moments(z, y, delta_tau)
 
     def _monte_carlo_transition_logits(
         self,
@@ -476,8 +494,13 @@ class HyperbolicBridge(nn.Module):
         delta_tau: torch.Tensor | float,
         num_samples: int,
     ):
-        transition = self._sample_transition(z, y, delta_tau, num_samples=num_samples)
-        return self.discrete_logits(transition)
+        mean_state, state_var = self._sample_transition(
+            z, y, delta_tau, num_samples=num_samples
+        )
+        logits_mean, logits_var = self._logit_moments_from_state_moments(
+            mean_state, state_var
+        )
+        return logits_mean, logits_var, state_var.squeeze(-1)
 
     def _diagonal_probit_probs(
         self, logits_mean: torch.Tensor, logits_var: torch.Tensor
@@ -494,25 +517,41 @@ class HyperbolicBridge(nn.Module):
         delta_tau: torch.Tensor | float,
         num_samples: int,
     ):
-        logits = self._monte_carlo_transition_logits(
+        logits_mean, logits_var, _ = self._monte_carlo_transition_logits(
             z, y, delta_tau, num_samples=num_samples
         )
-        logits_mean = logits.mean(dim=0)
-        logits_var = (logits.square().mean(dim=0) - logits_mean.square()).clamp(min=0.0)
         return logits_mean, logits_var
 
-    def _binary_gauss_hermite_probs(self, logits: torch.Tensor):
-        if logits.shape[-1] != 2:
+    def _binary_gauss_hermite_probs(
+        self,
+        logits: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | torch.Tensor,
+    ):
+        if isinstance(logits, tuple):
+            logits_mean, _, state_var = logits
+        else:
+            logits_mean = logits.mean(dim=0)
+            state_var = None
+        if logits_mean.shape[-1] != 2:
             raise ValueError(
                 "gauss_hermite discrete approximation currently only supports K=2"
             )
-        gap = logits[..., 0] - logits[..., 1]
-        gap_mean = gap.mean(dim=0)
-        gap_var = (gap.square().mean(dim=0) - gap_mean.square()).clamp(min=0.0)
+        gap_mean = logits_mean[..., 0] - logits_mean[..., 1]
+        if state_var is None:
+            gap = logits[..., 0] - logits[..., 1]
+            gap_var = (gap.square().mean(dim=0) - gap_mean.square()).clamp(min=0.0)
+        else:
+            endpoint_gap = (self.endpoints[0] - self.endpoints[1]).to(
+                device=gap_mean.device, dtype=gap_mean.dtype
+            )
+            gap_var = (
+                state_var
+                * endpoint_gap.square().sum()
+                / (self.discrete_temperature**2)
+            ).clamp(min=0.0)
         gap_std = gap_var.sqrt()
 
-        nodes = self.gh_nodes.to(device=logits.device, dtype=logits.dtype)
-        weights = self.gh_weights.to(device=logits.device, dtype=logits.dtype)
+        nodes = self.gh_nodes.to(device=gap_mean.device, dtype=gap_mean.dtype)
+        weights = self.gh_weights.to(device=gap_mean.device, dtype=gap_mean.dtype)
         shape = (nodes.shape[0],) + (1,) * gap_mean.ndim
         quadrature_points = gap_mean.unsqueeze(0) + math.sqrt(2.0) * gap_std.unsqueeze(
             0
@@ -531,16 +570,17 @@ class HyperbolicBridge(nn.Module):
         num_samples: int,
         method: str | None = None,
     ):
+        del num_samples
         if method is None:
             method = self.discrete_approximation
         if method == "diag_probit":
             logits_mean, logits_var = self._monte_carlo_transition_logits_stats(
-                z, y, delta_tau, num_samples=num_samples
+                z, y, delta_tau, num_samples=0
             )
             return self._diagonal_probit_probs(logits_mean, logits_var)
         if method == "gauss_hermite":
             logits = self._monte_carlo_transition_logits(
-                z, y, delta_tau, num_samples=num_samples
+                z, y, delta_tau, num_samples=0
             )
             return self._binary_gauss_hermite_probs(logits)
         raise ValueError(f"Approximation method {method} is not supported.")
@@ -554,6 +594,8 @@ class HyperbolicBridge(nn.Module):
         num_samples: int,
     ):
         pred_n = self.normalize_endpoint(pred)
+        # This is L_Discrete in hyper_dm.md: the categorical KL between
+        # local-chart one-step bridge approximations under q and p_theta.
         q_probs = self._approximate_discrete_transition_probs(
             z, y, delta_tau, num_samples=num_samples
         )
@@ -571,11 +613,35 @@ class HyperbolicBridge(nn.Module):
         num_samples: int,
     ):
         pred_n = self.normalize_endpoint(pred)
+        # Approximate p_theta(w_0 | x_1) by projecting the local-chart
+        # Gaussian reverse step through the discrete emission model.
         probs = self._approximate_discrete_transition_probs(
             z, pred_n, delta_tau, num_samples=num_samples
         )
         targets = self.project_to_discrete(y).unsqueeze(-1)
         return -probs.log().gather(-1, targets).squeeze(-1)
+
+    def discrete_refinement_term(
+        self,
+        z: torch.Tensor,
+        y: torch.Tensor,
+        pred: torch.Tensor,
+        delta_tau: torch.Tensor | float,
+    ):
+        pred_n = self.normalize_endpoint(pred)
+        mean_q, state_var = self._local_chart_transition_moments(z, y, delta_tau)
+        mean_p, _ = self._local_chart_transition_moments(z, pred_n, delta_tau)
+        logits_mean_q, _ = self._logit_moments_from_state_moments(mean_q, state_var)
+        logits_mean_p, _ = self._logit_moments_from_state_moments(mean_p, state_var)
+        pi_q = logits_mean_q.softmax(dim=-1)
+        pi_p = logits_mean_p.softmax(dim=-1)
+        feedback = (
+            state_var / self.discrete_temperature
+        ) * ((pi_q - pi_p) @ self.endpoints.to(device=z.device, dtype=z.dtype))
+        delta = (mean_p - mean_q) + feedback
+        return delta.square().sum(dim=-1) / (
+            2.0 * state_var.squeeze(-1).clamp(min=1e-8)
+        )
 
 
 class EulerScheduler:
@@ -903,8 +969,10 @@ class UnigramHyperbolicDLM(L.LightningModule):
             "train_prior": [],
             "train_diffusion": [],
             "train_discrete_diffusion": [],
+            "train_discrete_refinement": [],
             "train_reconstruction": [],
             "train_discrete_reconstruction": [],
+            "train_discrete_initial": [],
             "train_recon_conf_sq": [],
             "train_recon_last_step": [],
             "train_horocycle_scale": [],
@@ -916,8 +984,10 @@ class UnigramHyperbolicDLM(L.LightningModule):
             "val_prior": [],
             "val_diffusion": [],
             "val_discrete_diffusion": [],
+            "val_discrete_refinement": [],
             "val_reconstruction": [],
             "val_discrete_reconstruction": [],
+            "val_discrete_initial": [],
             "val_recon_conf_sq": [],
             "val_recon_last_step": [],
             "val_horocycle_scale": [],
@@ -1042,10 +1112,14 @@ class UnigramHyperbolicDLM(L.LightningModule):
             schedule.delta_tau[1:],
             num_samples=discrete_mc_samples,
         ).sum(dim=-1)
+        discrete_refinement = self.bridge.discrete_refinement_term(
+            z_diff, y_diff, pred_diff, schedule.delta_tau[1:]
+        ).sum(dim=-1)
         return {
             **surrogate_losses,
             "diffusion": diffusion,
             "discrete_diffusion": discrete_diffusion,
+            "discrete_refinement": discrete_refinement,
         }
 
     def _compute_reconstruction_losses(
@@ -1061,6 +1135,9 @@ class UnigramHyperbolicDLM(L.LightningModule):
         discrete_recon = self.bridge.discrete_reconstruction_term(
             z_recon, y, pred_recon, delta_tau_recon, num_samples=discrete_mc_samples
         )
+        discrete_initial = self.bridge.discrete_refinement_term(
+            z_recon, y, pred_recon, delta_tau_recon
+        )
         _, recon_conf, recon_diff, recon_residual = self._reconstruction_residual_terms(
             z_recon, y, pred_recon, delta_tau_recon
         )
@@ -1071,6 +1148,7 @@ class UnigramHyperbolicDLM(L.LightningModule):
         return {
             "reconstruction": recon,
             "discrete_reconstruction": discrete_recon,
+            "discrete_initial": discrete_initial,
             "recon_conf_sq": recon_conf_sq,
             "recon_last_step": recon_last_step,
             "horocycle_scale": horocycle_scale,
@@ -1096,7 +1174,9 @@ class UnigramHyperbolicDLM(L.LightningModule):
         discrete_nelbo = (
             prior
             + diffusion_losses["discrete_diffusion"]
+            + diffusion_losses["discrete_refinement"]
             + reconstruction_losses["discrete_reconstruction"]
+            + reconstruction_losses["discrete_initial"]
         )
 
         return {
@@ -1131,10 +1211,12 @@ class UnigramHyperbolicDLM(L.LightningModule):
         train_prior = losses["prior"].mean().detach()
         train_diffusion = losses["diffusion"].mean().detach()
         train_discrete_diffusion = losses["discrete_diffusion"].mean().detach()
+        train_discrete_refinement = losses["discrete_refinement"].mean().detach()
         train_reconstruction = losses["reconstruction"].mean().detach()
         train_discrete_reconstruction = (
             losses["discrete_reconstruction"].mean().detach()
         )
+        train_discrete_initial = losses["discrete_initial"].mean().detach()
         train_recon_conf_sq = losses["recon_conf_sq"].mean().detach()
         train_recon_last_step = losses["recon_last_step"].mean().detach()
         train_horocycle_scale = losses["horocycle_scale"].mean().detach()
@@ -1190,6 +1272,14 @@ class UnigramHyperbolicDLM(L.LightningModule):
             batch_size=batch_size,
         )
         self.log(
+            "train_discrete_refinement",
+            train_discrete_refinement,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            batch_size=batch_size,
+        )
+        self.log(
             "train_reconstruction",
             train_reconstruction,
             on_step=True,
@@ -1200,6 +1290,14 @@ class UnigramHyperbolicDLM(L.LightningModule):
         self.log(
             "train_discrete_reconstruction",
             train_discrete_reconstruction,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=False,
+            batch_size=batch_size,
+        )
+        self.log(
+            "train_discrete_initial",
+            train_discrete_initial,
             on_step=True,
             on_epoch=True,
             prog_bar=False,
@@ -1258,11 +1356,17 @@ class UnigramHyperbolicDLM(L.LightningModule):
             self.history["train_discrete_diffusion"].append(
                 float(train_discrete_diffusion.cpu())
             )
+            self.history["train_discrete_refinement"].append(
+                float(train_discrete_refinement.cpu())
+            )
             self.history["train_reconstruction"].append(
                 float(train_reconstruction.cpu())
             )
             self.history["train_discrete_reconstruction"].append(
                 float(train_discrete_reconstruction.cpu())
+            )
+            self.history["train_discrete_initial"].append(
+                float(train_discrete_initial.cpu())
             )
             self.history["train_recon_conf_sq"].append(float(train_recon_conf_sq.cpu()))
             self.history["train_recon_last_step"].append(
@@ -1285,8 +1389,10 @@ class UnigramHyperbolicDLM(L.LightningModule):
         val_prior = losses["prior"].mean()
         val_diffusion = losses["diffusion"].mean()
         val_discrete_diffusion = losses["discrete_diffusion"].mean()
+        val_discrete_refinement = losses["discrete_refinement"].mean()
         val_reconstruction = losses["reconstruction"].mean()
         val_discrete_reconstruction = losses["discrete_reconstruction"].mean()
+        val_discrete_initial = losses["discrete_initial"].mean()
         val_recon_conf_sq = losses["recon_conf_sq"].mean()
         val_recon_last_step = losses["recon_last_step"].mean()
         val_horocycle_scale = losses["horocycle_scale"].mean()
@@ -1342,6 +1448,14 @@ class UnigramHyperbolicDLM(L.LightningModule):
             batch_size=batch_size,
         )
         self.log(
+            "val_discrete_refinement",
+            val_discrete_refinement,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            batch_size=batch_size,
+        )
+        self.log(
             "val_reconstruction",
             val_reconstruction,
             on_step=False,
@@ -1352,6 +1466,14 @@ class UnigramHyperbolicDLM(L.LightningModule):
         self.log(
             "val_discrete_reconstruction",
             val_discrete_reconstruction,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=False,
+            batch_size=batch_size,
+        )
+        self.log(
+            "val_discrete_initial",
+            val_discrete_initial,
             on_step=False,
             on_epoch=True,
             prog_bar=False,
@@ -1449,8 +1571,10 @@ class UnigramHyperbolicDLM(L.LightningModule):
             "val_prior",
             "val_diffusion",
             "val_discrete_diffusion",
+            "val_discrete_refinement",
             "val_reconstruction",
             "val_discrete_reconstruction",
+            "val_discrete_initial",
             "val_recon_conf_sq",
             "val_recon_last_step",
             "val_horocycle_scale",
@@ -1472,11 +1596,17 @@ class UnigramHyperbolicDLM(L.LightningModule):
         self.history["val_discrete_diffusion"].append(
             float(metrics["val_discrete_diffusion"].detach().cpu())
         )
+        self.history["val_discrete_refinement"].append(
+            float(metrics["val_discrete_refinement"].detach().cpu())
+        )
         self.history["val_reconstruction"].append(
             float(metrics["val_reconstruction"].detach().cpu())
         )
         self.history["val_discrete_reconstruction"].append(
             float(metrics["val_discrete_reconstruction"].detach().cpu())
+        )
+        self.history["val_discrete_initial"].append(
+            float(metrics["val_discrete_initial"].detach().cpu())
         )
         self.history["val_recon_conf_sq"].append(
             float(metrics["val_recon_conf_sq"].detach().cpu())
@@ -1555,7 +1685,7 @@ def plot_history(model: UnigramHyperbolicDLM, output_path: Path):
         discrete_diff_ax.plot(
             model.history["train_step"],
             model.history["train_discrete_diffusion"],
-            label="Train Discrete Diffusion",
+            label="Train Discrete Denoising",
             color="tab:blue",
             linewidth=1.8,
         )
@@ -1570,6 +1700,20 @@ def plot_history(model: UnigramHyperbolicDLM, output_path: Path):
             model.history["train_step"],
             model.history["train_discrete_reconstruction"],
             label="Train Discrete Reconstruction",
+            color="tab:orange",
+            linewidth=1.8,
+        )
+        empty_ax_1.plot(
+            model.history["train_step"],
+            model.history["train_discrete_refinement"],
+            label="Train Discrete Refinement",
+            color="tab:blue",
+            linewidth=1.8,
+        )
+        empty_ax_2.plot(
+            model.history["train_step"],
+            model.history["train_discrete_initial"],
+            label="Train Discrete Initial",
             color="tab:orange",
             linewidth=1.8,
         )
@@ -1615,7 +1759,7 @@ def plot_history(model: UnigramHyperbolicDLM, output_path: Path):
         discrete_diff_ax.plot(
             model.history["val_step"],
             model.history["val_discrete_diffusion"],
-            label="Val Discrete Diffusion",
+            label="Val Discrete Denoising",
             color="tab:green",
             linewidth=1.8,
         )
@@ -1630,6 +1774,20 @@ def plot_history(model: UnigramHyperbolicDLM, output_path: Path):
             model.history["val_step"],
             model.history["val_discrete_reconstruction"],
             label="Val Discrete Reconstruction",
+            color="tab:red",
+            linewidth=1.8,
+        )
+        empty_ax_1.plot(
+            model.history["val_step"],
+            model.history["val_discrete_refinement"],
+            label="Val Discrete Refinement",
+            color="tab:green",
+            linewidth=1.8,
+        )
+        empty_ax_2.plot(
+            model.history["val_step"],
+            model.history["val_discrete_initial"],
+            label="Val Discrete Initial",
             color="tab:red",
             linewidth=1.8,
         )
@@ -1723,7 +1881,7 @@ def plot_history(model: UnigramHyperbolicDLM, output_path: Path):
 
     discrete_nelbo_ax.set_ylabel("Nats")
     discrete_nelbo_ax.set_title(
-        "Full Discrete NELBO = Prior + Diffusion + Reconstruction"
+        "Full Discrete NELBO = Denoising + Refinement + Reconstruction + Initial"
     )
     discrete_nelbo_ax.grid(alpha=0.2)
     discrete_nelbo_ax.legend()
@@ -1734,7 +1892,7 @@ def plot_history(model: UnigramHyperbolicDLM, output_path: Path):
     diff_ax.legend()
 
     discrete_diff_ax.set_ylabel("Nats")
-    discrete_diff_ax.set_title("Discrete NELBO Diffusion Term")
+    discrete_diff_ax.set_title(r"Discrete Denoising $L_{Discrete}$")
     discrete_diff_ax.grid(alpha=0.2)
     discrete_diff_ax.legend()
 
@@ -1772,9 +1930,16 @@ def plot_history(model: UnigramHyperbolicDLM, output_path: Path):
     discrete_recon_ax.set_xlabel("Optimization step")
     geom_ax.set_xlabel("Optimization step")
     scale_ax.set_xlabel("Optimization step")
-
-    empty_ax_1.axis("off")
-    empty_ax_2.axis("off")
+    empty_ax_1.set_xlabel("Optimization step")
+    empty_ax_1.set_ylabel("Nats")
+    empty_ax_1.set_title(r"Continuous Refinement $L_{Refinement}$")
+    empty_ax_1.grid(alpha=0.2)
+    empty_ax_1.legend()
+    empty_ax_2.set_xlabel("Optimization step")
+    empty_ax_2.set_ylabel("Nats")
+    empty_ax_2.set_title(r"Initial $L_{Initial}$")
+    empty_ax_2.grid(alpha=0.2)
+    empty_ax_2.legend()
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)

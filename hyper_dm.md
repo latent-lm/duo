@@ -1,12 +1,12 @@
 ### Brownian Motion on Manifold
 #### Brownian Motion on Poincare Disk with Local Chart Projection
-Given a $d$-dimensional SDE as $d z_t = f(z_t, t) dt + \sigma(t) dw$ on the hyperbolic space $\mathbb{H}^d$, the SDE with $t: 0 \to \infty$ on the local chart of Poincare Disk $\mathbb{D}^d$ is described as
-$$dx_t = \left( f(x_t, t) + \frac{\sigma(t)^2 (d-2) (1 - \|x_t\|^2)}{4} x_t \right) dt + \frac{\sigma(t) (1 - \|x_t\|^2)}{2} dW_t$$
+Given a $d$-dimensional SDE as $d z_t = f(z_t, t) dt + \sigma(z_t, t) dw$ on the hyperbolic space $\mathbb{H}^d$, the SDE with $t: 0 \to \infty$ on the local chart of Poincare Disk $\mathbb{D}^d$ is described as
+$$dx_t = \left( f(x_t, t) + \frac{\sigma(x_t, t)^2 (d-2) (1 - \|x_t\|^2)}{4} x_t \right) dt + \frac{\sigma(x_t, t) (1 - \|x_t\|^2)}{2} dW_t$$
 > Proof: Derive the SDE on the local chart of Poincare Disk
 
 #### Brownian Bridge on Poincare Disk with Local Chart Projection
 Given a target point $y$ at the boundary of the Poincare Disk $||y|| = 1$, the Brownian bridge with $t: \infty \to 0$ is described as
-$$dx_t = \left( f(x_t, t) + \sigma^2(t) \frac{d-1}{2} \frac{(1-\|x_t\|^2)^2}{\|y-x_t\|^2} (y-x_t) - \frac{\sigma^2(t) d}{4} (1-\|x_t\|^2) x_t \right) dt + \frac{\sigma(t) (1-\|x_t\|^2)}{2} d\bar{W}_t$$
+$$dx_t = \left( f(x_t, t) + \sigma^2(x_t, t) \frac{d-1}{2} \frac{(1-\|x_t\|^2)^2}{\|y-x_t\|^2} (y-x_t) - \frac{\sigma^2(x_t, t) d}{4} (1-\|x_t\|^2) x_t \right) dt + \frac{\sigma(x_t, t) (1-\|x_t\|^2)}{2} d\bar{W}_t$$
 Therefore, $q(y | x_t)$ is
 $$
 q(y | x_t) = \frac{1}{A_{d-1}} \left( \frac{1 - \|x_t\|^2}{\|x_t - y\|^2} \right)^{d-1}
@@ -19,7 +19,7 @@ where $A_{d-1} = \frac{2\pi^{d/2}}{\Gamma(d/2)}$ is the surface area of $(d-1)$-
 - Use Doob's h-transform for bridge drift
 - Bridge marginal is $p(x_t | O) K(x, y)$
 
-#### Hyperbolic Brownian Motion in the Hyperboloid / Lorentz Model
+#### Brownian Motion on the Hyperboloid / Lorentz Model with Local Chart Projection
 We use the hyperboloid model
 $$
 \begin{aligned}
@@ -53,20 +53,20 @@ d_{\mathbb H}(x,y)=\operatorname{arcosh}\!\bigl(-\langle x,y\rangle_L\bigr).
 $$
 If $f(x_t,t)\in T_{x_t}\mathbb H^d$, then the Ito SDE on $\mathbb H^d$ with generator
 $$
-L=\langle f,\nabla_{\mathbb H}\rangle+\frac{\sigma(t)^2}{2}\Delta_{\mathbb H}
+L=\langle f,\nabla_{\mathbb H}\rangle+\frac{\sigma(x_t, t)^2}{2}\Delta_{\mathbb H}
 $$
 has the ambient-space form
 $$
 dx_t
 =
-\left(f(x_t,t)+\frac{d}{2}\sigma(t)^2 x_t\right)dt
-+ \sigma(t)\Pi_{x_t}\, dW_t.
+\left(f(x_t,t)+\frac{d}{2}\sigma(x_t, t)^2 x_t\right)dt
++ \sigma(x_t, t)\Pi_{x_t}\, dW_t.
 $$
 This is the Ito form. The corresponding Stratonovich form is geometrically cleaner, and converting to Ito produces the curvature drift $+\frac d2 \sigma(t)^2 x_t$.
 
 > Proof: Derive the ambient Ito form on the hyperboloid
 
-#### Hyperbolic Brownian Bridge Conditioned on an Ideal Boundary Point
+#### Brownian Bridge on the Hyperboloid / Lorentz Model with Local Chart Projection
 Refer to [derivation](https://claude.ai/share/53c00a93-a442-42a5-bf08-c1a8fe927191). Let $y \in S^{d-1}$ and represent the corresponding ideal boundary point by the null vector
 $$
 \xi(y)=(1,y),
@@ -90,12 +90,12 @@ dx_t
 =
 \left(
 f(x_t,t)
-- \frac{(d-1)\sigma(t)^2}{\langle x_t,\xi(y)\rangle_L}\xi(y)
-- \frac{d-2}{2}\sigma(t)^2 x_t
+- \frac{(d-1) \sigma(x_t, t)^2}{\langle x_t,\xi(y)\rangle_L}\xi(y)
+- \frac{d-2}{2}\sigma(x_t, t)^2 x_t
 \right)dt
-+ \sigma(t)\Pi_{x_t}\, dW_t.
++ \sigma(x_t, t)\Pi_{x_t}\, dW_t.
 $$
-Equivalently, if $h_{\xi}(x)\propto \left(-\langle x,\xi\rangle_L\right)^{-(d-1)}$, then the added drift is $\sigma(t)^2 \nabla_{\mathbb H}\log h_\xi(x)$.
+Equivalently, if $h_{\xi}(x)\propto \left(-\langle x,\xi\rangle_L\right)^{-(d-1)}$, then the added drift is $\sigma(x_t, t)^2 \nabla_{\mathbb H}\log h_\xi(x)$.
 
 > Proof: Derive the boundary-conditioned drift from the Poisson kernel via a Doob $h$-transform
 ### Poincare Disk Brownian Bridge Diffusion
@@ -103,6 +103,8 @@ Given 2 Brownian bridge $q(x_{0:T} | y), \{x_t\} \subset T_{x_t} \mathbb{D}^d$ a
 - (1) in the continuous bridge limit, both bridges start from the origin at time $\infty$
 - (2) the discrete schedule has fixed step size $\tau(i) - \tau(i-1) = \Delta t \ll 1$ for all $i$
 and target points $|| y || = 1$ are at the boundary of Poincare disk $\mathbb{D}^d = \{ x \in \mathbb{R}^d : \|x\| < 1 \}$. 
+
+The Brownian bridge on the local chart of Poincare Disk,
 $$
 \begin{aligned}
 dx_t & = \left( \frac{d-1}{2} \frac{(1-\|x_t\|^2)^2}{\|y-x_t\|^2} (y-x_t) - \frac{d}{4} (1-\|x_t\|^2) x_t \right) dt + \frac{1-\|x_t\|^2}{2} d\bar{W}_t \\
@@ -118,7 +120,7 @@ Both bridges can be expressed as $dx_t = f(t, x_t, y) dt + g(t, x_t) d \bar{W}_t
 $$
 0 = \tau(0) < \tau(1) < \cdots < \tau(T) < \infty, \qquad \tau(i) - \tau(i-1) = \Delta t \text{ for all } i.
 $$
-Since $\tau(T) = T \Delta t$ under the uniform-step schedule, the continuous bridge limit is recovered by letting $T \to \infty$, $\Delta t \to 0$, and hence $\tau(T) = T \Delta t \to \infty$. Then the **local Euler-Gaussian approximation** of the one-step posterior is
+Then the **local Euler-Gaussian approximation** of the one-step posterior is
 $$
 \begin{aligned}
 q(x_{\tau(i-1)} \mid x_{\tau(i)}, y)
@@ -283,16 +285,6 @@ q(h_{\mathcal{T}}(x_{\tau(i-1)}) \mid x_{\tau(i)}, y)
 p_\theta(h_{\mathcal{T}}(x_{\tau(i-1)}) \mid x_{\tau(i)})
 & \approx \mathcal{N} \Big(h_{\mathcal{T}}(x_{\tau(i)}) + \hat f(\tau(i), x_{\tau(i)}, \hat y_\theta(x_{\tau(i)},\tau(i))) \Delta t,\; g(\tau(i), x_{\tau(i)})^2 \Delta t\Big).
 \end{aligned}
-$$
-where
-$$
-C_w(t, x_t)
-:=
-\hat g(t, x_t) \hat g(t, x_t)^\top
-=
-J_h(x_t)\bar{\sigma}(t, x_t)\bar{\sigma}(t, x_t)^\top J_h(x_t)^\top
-=
-g(t, x_t)^2 J_h(x_t) J_h(x_t)^\top.
 $$
 This covariance is generally singular and supported on the simplex tangent space.
 ##### Softmax Pushforward Approximation 
@@ -856,31 +848,31 @@ $$
 \underbrace{
 \mathbb E_{q(x_0\mid w_0)}
 D_{\mathrm{KL}}\!\bigl(q(x_T\mid x_0)\,\|\,p_{\theta}(x_T)\bigr)
-}_{\text{Prior}}
+}_{L_{\text{Prior}}}
 +
 \underbrace{
 \sum_{t=2}^T
 \mathbb E_{q(x_t,x_0\mid w_0)}
 D_{\mathrm{KL}}\!\bigl(q(x_{t-1}\mid x_t,x_0)\,\|\,p_\theta(x_{t-1}\mid x_t)\bigr)
-}_{\text{Diffusion}}
+}_{L_{\text{Diffusion}}}
 \\
 &\quad+
 \underbrace{
 \mathbb E_{q(x_0,x_1\mid w_0)}
 \bigl[-\log p_\theta(x_0\mid x_1)\bigr]
-}_{\text{Latent reconstruction}}
+}_{L_{\text{Reconstruction}}}
 +
 \underbrace{
 \sum_{t=1}^T
 \mathbb E_{q(x_t\mid w_0)}
 D_{\mathrm{KL}}\!\bigl(q(w_t\mid x_t)\,\|\,p_\theta(w_t\mid x_t)\bigr)
-}_{\text{Future emission matching}}
+}_{L_{\text{Projection}}}
 \\
 &\quad+
 \underbrace{
 \mathbb E_{q(x_0\mid w_0)}
 \bigl[\log q(x_0\mid w_0)-\log p_\theta(w_0\mid x_0)\bigr]
-}_{\text{Initial inference / observation term}}.
+}_{L_{\text{Init}}}..
 \end{aligned}
 $$
 
@@ -1185,6 +1177,8 @@ $$
 $$
 ### Local-Chart Approximated NELBO in Simplex Space with Small Step
 This derivation is a local-chart, small-step approximate NELBO induced by the Euler-Gaussian approximation above together with the Simplex projection $w_t = softmax(\frac{E x_t}{\mathcal{T}})$; it is not the exact manifold ELBO on discrete states. Recall the NELBO on the simplex space is
+
+%% # ELBO Ver. 2 %%
 $$
 \begin{aligned}
 \mathcal L_{\text{NELBO}}(w_0)
@@ -1490,6 +1484,7 @@ $$
 ### Local-Chart Approximated NELBO in Discrete Space with Small Step
 For a probability model $p_{\theta}$ and a categorical process $w_{1:T}$, the NELBO of the bridge diffusion conditioned on $w_0$ is following.
 
+%% # ELBO Ver. 1 %%
 $$
 \begin{aligned}
 - \log p_{\theta}(w_0) 
@@ -1520,8 +1515,8 @@ q(w_{t-1}\mid x_t,x_0)\,\|\,p_\theta(w_{t-1}\mid x_t)
 \sum_{t=2}^T
 \underbrace{
 \mathbb E_{q(w_{t-1},x_t,x_0\mid w_0)}
-D_{\mathrm{KL}}\!\bigl(
-q(x_{t-1}\mid w_{t-1},x_t,x_0) || p_\theta(x_{t-1}\mid w_{t-1},x_t)
+D_{\mathrm{KL}} \bigl(
+q(x_{t-1} \mid w_{t-1},x_t,x_0) || p_\theta(x_{t-1}\mid w_{t-1},x_t)
 \bigr)
 }_{\text{Continuous Refinement}} \\
 &\quad+
@@ -1564,48 +1559,42 @@ $$
 From the Euler-Gaussian approximation, the ambient-space transitions are
 $$
 \begin{aligned}
-q(x_{t-1} \mid x_t, x_0) &\approx \mathcal{N}\!\big(x_t + f(\tau(t), x_t, x_0)\,\Delta t,\; g(\tau(t), x_t)^2\, I_d\,\Delta t\big), \\
-p_\theta(x_{t-1} \mid x_t) &\approx \mathcal{N}\!\big(x_t + f(\tau(t), x_t, \hat{y}_\theta)\,\Delta t,\; g(\tau(t), x_t)^2\, I_d\,\Delta t\big),
+q(x_{t-1} \mid x_t, x_0) &\approx \mathcal{N}\!\big(x_{t-1};\; m_{t-1}^{q},\; \sigma_{t-1}^2\, I_d\big), \\
+p_\theta(x_{t-1} \mid x_t) &\approx \mathcal{N}\!\big(x_{t-1};\; m_{t-1}^{\theta},\; \sigma_{t-1}^2\, I_d\big),
 \end{aligned}
 $$
-where $\hat{y}_\theta := f_\theta(x_t, \tau(t)) / \|f_\theta(x_t, \tau(t))\|$. Since $z(x) = Ex/\mathcal{T}$ is a linear map of $x$, the logit distributions are also Gaussian:
+where
 $$
 \begin{aligned}
-z_{t-1} \mid x_t, x_0 &\sim \mathcal{N}(\mu_{t-1}^{q},\; \Sigma_{t-1}), \\
-z_{t-1} \mid x_t &\sim \mathcal{N}(\mu_{t-1}^{\theta},\; \Sigma_{t-1}),
+m_{t-1}^{q} := x_t + f(\tau(t), x_t, x_0)\,\Delta t, \quad
+m_{t-1}^{\theta} := x_t + f(\tau(t), x_t, \hat{y}_\theta)\,\Delta t, \quad
+\sigma_{t-1}^2 := g(\tau(t), x_t)^2\,\Delta t, \\
 \end{aligned}
 $$
-with
+and
+$$
+\hat{y}_\theta := \frac{f_{\theta}(x_t, \tau(t))}{|| f_{\theta}(x_t, \tau(t)) ||}
+$$The probit approximation computes the marginal categorical probability $\mathbb{E}_{x_{t-1}}[\operatorname{softmax}(E x_{t-1}/\mathcal{T})]$. Since the logit mean and diagonal variance are
+$$
+\mathbb{E}\!\left[\frac{E x_{t-1}}{\mathcal{T}}\right] = \frac{E\, m}{\mathcal{T}}, \qquad
+\operatorname{Var}\!\left[\frac{[E x_{t-1}]_k}{\mathcal{T}}\right] = \frac{\sigma^2 \|e_k\|^2}{\mathcal{T}^2},
+$$
+where $e_k \in \mathbb{R}^d$ is the $k$-th row of $E$, the diagonal probit approximation gives
 $$
 \begin{aligned}
-\mu_{t-1}^{q}
-&:= z(x_t) + \frac{E\, f(\tau(t), x_t, x_0)}{\mathcal{T}}\,\Delta t, \\
-\mu_{t-1}^{\theta}
-&:= z(x_t) + \frac{E\, f(\tau(t), x_t, \hat{y}_\theta)}{\mathcal{T}}\,\Delta t, \\
-\Sigma_{t-1}
-&:= \frac{g(\tau(t), x_t)^2}{\mathcal{T}^2}\, E E^\top\, \Delta t.
-\end{aligned}
-$$
-Note that both processes share the same covariance $\Sigma_{t-1}$. Applying the diagonal probit approximation directly to these analytical moments,
-$$
-\begin{aligned}
-\hat{\pi}_{t-1}^{q}
+\hat{\pi}_{t-1, k}^{q}
 &:= \operatorname{softmax}\!\left(
-\mu^{q}_{t-1} \oslash \sqrt{ 1 + \frac{\pi}{8} \operatorname{diag}(\Sigma_{t-1}) } \right), \\
-\hat{\pi}_{t-1}^{\theta}
+\frac{E\, m_{t-1}^{q}}{\mathcal{T}} \oslash \sqrt{ 1 + \frac{\pi}{8} \frac{\sigma_{t-1}^2 \|e_k\|^2}{\mathcal{T}^2} } \right), \\
+\hat{\pi}_{t-1, k}^{\theta}
 &:= \operatorname{softmax}\!\left(
-\mu^{\theta}_{t-1} \oslash \sqrt{ 1 + \frac{\pi}{8} \operatorname{diag}(\Sigma_{t-1}) } \right),
+\frac{E\, m_{t-1}^{\theta}}{\mathcal{T}} \oslash \sqrt{ 1 + \frac{\pi}{8} \frac{\sigma_{t-1}^2 \|e_k\|^2}{\mathcal{T}^2} } \right),
 \end{aligned}
 $$
-where $\oslash$ is element-wise division and $\operatorname{diag}(\Sigma_{t-1}) \in \mathbb{R}^K$ extracts the diagonal. Explicitly, the $k$-th diagonal entry is
+where $\oslash$ is element-wise division and each $k$-th component is scaled by its own factor. Since $\sigma_{t-1}^2$ is shared, the scaling denominator is the same for both $\hat{\pi}^q$ and $\hat{\pi}^\theta$. Thus
 $$
-[\operatorname{diag}(\Sigma_{t-1})]_k = \frac{g(\tau(t), x_t)^2 \, \|e_k\|^2}{\mathcal{T}^2}\, \Delta t,
-$$
-where $e_k \in \mathbb{R}^d$ is the $k$-th row of the embedding matrix $E$. Since $\Sigma_{t-1}$ is shared, the scaling denominator $\sqrt{1 + \frac{\pi}{8}\operatorname{diag}(\Sigma_{t-1})}$ is the same for both $\hat{\pi}^q$ and $\hat{\pi}^\theta$. Thus
-$$
-\tilde q(w_{t-1}\mid x_t,x_0) \approx \text{Cat}(w_{t-1};\hat{\pi}_{t-1}^{q}),
+q(w_{t-1}\mid x_t,x_0) \approx \text{Cat}(w_{t-1};\hat{\pi}_{t-1}^{q}),
 \qquad
-\tilde p_\theta(w_{t-1}\mid x_t) \approx \text{Cat}(w_{t-1};\hat{\pi}_{t-1}^{\theta}).
+p_\theta(w_{t-1}\mid x_t) \approx \text{Cat}(w_{t-1};\hat{\pi}_{t-1}^{\theta}).
 $$
 Hence the discrete denoising term is estimated by
 $$
@@ -1631,105 +1620,524 @@ D_{\mathrm{KL}}\!\bigl(
 \end{aligned}
 $$
 #### Continuous Refinement: $L_{Refinement}$
+
+The Discrete Denoising term above handles *which category* $w_{t-1}$ to pick. The Continuous Refinement term handles the complementary question: *given* the chosen category $w_{t-1}$, where should the continuous state $x_{t-1}$ land?
+
 $$
 L_{\text{Refinement}} = \sum_{t=2}^T \mathbb{E}_{q(w_{t-1}, x_t, x_0 \mid w_0)} D_{\mathrm{KL}}\!\bigl(q(x_{t-1}\mid w_{t-1}, x_t, x_0) \;\|\; p_\theta(x_{t-1}\mid w_{t-1}, x_t)\bigr).
 $$
-##### Intractable posterior via Bayes' rule
-By Bayes' rule,
+##### Intractable posterior via Bayesian rule
+By Bayesian rule,
 $$
-q(x_{t-1}\mid w_{t-1}, x_t, x_0) = \frac{q(w_{t-1}\mid x_{t-1}) \;\cdot\; q(x_{t-1}\mid x_t, x_0)}{q(w_{t-1}\mid x_t, x_0)},
+\begin{aligned}
+q(x_{t-1} | w_{t-1}, x_t, x_0) 
+& = \frac{q(w_{t-1} | x_{t-1}) \cdot q(x_{t-1} | x_t, x_0)}{q(w_{t-1} | x_t, x_0)} \\
+& = \frac{q(w_{t-1} | x_{t-1}) \cdot q(x_{t-1} | x_t, x_0)}{\int q(w_{t-1} | x_{t-1}) \cdot q(x_{t-1} | x_t, x_0) d x_{t-1}}, \\
+\end{aligned}
 $$
 where $q(x_{t-1}\mid x_t, x_0) = \mathcal{N}(x_{t-1};\, m_{t-1}^{q},\, \sigma_{t-1}^2 I_d)$ is the Euler-Gaussian bridge posterior with
-$$
-m_{t-1}^{q} := x_t + f(\tau(t), x_t, x_0)\,\Delta t, \qquad \sigma_{t-1}^2 := g(\tau(t), x_t)^2\,\Delta t,
-$$
-and $q(w_{t-1}\mid x_{t-1}) = \mathrm{Cat}(w_{t-1};\, \operatorname{softmax}(E x_{t-1}/\mathcal{T}))$ is the softmax emission. The posterior is a Gaussian $\times$ softmax — intractable due to the $\log\!\sum\!\exp$ normalizer.
-##### Laplace approximation
-For observed category $w_{t-1} = e_k$, the unnormalized log-posterior is
-$$
-\ell^q(x) := \log \operatorname{softmax}_k\!\left(\frac{Ex}{\mathcal{T}}\right) - \frac{\|x - m_{t-1}^{q}\|^2}{2\sigma_{t-1}^2}.
-$$
-**Mode.** Setting $\nabla_x \ell^q = 0$ with $\pi^{*,q} := \operatorname{softmax}(E x^{*,q}/\mathcal{T})$:
-$$
-x^{*,q} = m_{t-1}^{q} + \frac{\sigma_{t-1}^2}{\mathcal{T}}\, E^\top(e_k - \pi^{*,q}).
-$$
-This is an implicit fixed-point equation: the mode shifts from $m_{t-1}^{q}$ toward $E^\top e_k$ (the embedding of category $k$), with shift $\propto \sigma_{t-1}^2/\mathcal{T}$.
 
-**Precision.** The negative Hessian at the mode is
 $$
-\Lambda^q = \frac{1}{\sigma_{t-1}^2}\, I_d + \frac{1}{\mathcal{T}^2}\, E^\top F(\pi^{*,q})\, E, \qquad F(\pi) := \operatorname{diag}(\pi) - \pi\pi^\top,
+
+m_{t-1}^{q} := x_t + f(\tau(t), x_t, x_0)\,\Delta t, \qquad \Sigma_{t-1} := g(\tau(t), x_t)^2\,\Delta t,
+
 $$
-where $F(\pi)$ is the Fisher information of the categorical distribution ($F(\pi) \succeq 0$, rank $K{-}1$), so $\Lambda^q \succ 0$. Thus
+
+and $q(w_{t-1}\mid x_{t-1}) = \mathrm{Cat}(w_{t-1};\, \operatorname{softmax}(E x_{t-1}/\mathcal{T}))$ is the softmax emission.
+
+Considering the case $q(x_{t-1} | w_{t-1} = e_k, x_t, x_0)$,
 $$
-q(x_{t-1}\mid w_{t-1}, x_t, x_0) \approx \mathcal{N}\!\big(x_{t-1};\, x^{*,q},\, (\Lambda^q)^{-1}\big).
+\begin{aligned}
+q(x_{t-1} | w_{t-1} = e_k, x_t, x_0) 
+= \frac{\operatorname{softmax}_{k} \left(\frac{E x_{t-1}}{\mathcal{T}}\right)}{\operatorname{softmax}\!\left(
+\frac{E\, m_{t-1}^{q}}{\mathcal{T}} \oslash \sqrt{ 1 + \frac{\pi}{8} \frac{\sigma_{t-1}^2 \|e_k\|^2}{\mathcal{T}^2} } \right)} 
+	\cdot \mathcal{N}(x_{t-1}; m_{t-1}^{q},\, \Sigma_{t-1})
+\end{aligned}
 $$
-##### Reverse process
-The same Laplace approximation applied to $p_\theta(x_{t-1}\mid w_{t-1}, x_t)$ with $m_{t-1}^{\theta} := x_t + f(\tau(t), x_t, \hat{y}_\theta)\,\Delta t$ gives
+The density $q(x_{t-1} \mid w_{t-1}=e_k, x_t, x_0)$ is not Gaussian, because the factor
 $$
-p_\theta(x_{t-1}\mid w_{t-1}, x_t) \approx \mathcal{N}\!\big(x_{t-1};\, x^{*,\theta},\, (\Lambda^\theta)^{-1}\big),
+q(w_{t-1}=e_k \mid x_{t-1}) = \operatorname{softmax}_{k}\!\left(\frac{E x_{t-1}}{\mathcal{T}}\right)
+$$
+depends on the random variable $x_{t-1}$. Therefore, we use a Laplace approximation to find a Gaussian distribution whose mean and variance matches $q(x_{t-1} | w_{t-1} = e_k, x_t, x_0)$.
+
+##### Method 1: KL Divergence Chain Rule
+Recall that by Bayesian rule, the $q$ and $p_{\theta}$ are
+$$
+\begin{aligned}
+q(x_{t-1} | w_{t-1}, x_t, x_0) 
+& = \frac{q(w_{t-1} | x_{t-1}) \cdot q(x_{t-1} | x_t, x_0)}{q(w_{t-1} | x_t, x_0)} \\
+& = \frac{q(w_{t-1} | x_{t-1}) \cdot q(x_{t-1} | x_t, x_0)}{\int q(w_{t-1} | x_{t-1}) \cdot q(x_{t-1} | x_t, x_0) d x_{t-1}}, \\
+& = \frac{\operatorname{Cat}(w_{t-1}; \operatorname{softmax}(\frac{E x_{t-1}}{\mathcal{T}})) \mathcal{N}(x_{t-1}; m_{t-1}^{q}, \sigma_{t-1}^2)}{\operatorname{Cat}(w_{t-1}; \hat{\pi}_{t-1}^{q})} \\\end{aligned}
+$$
+$$
+\begin{aligned}
+p_{\theta}(x_{t-1} | w_{t-1}, x_t) 
+& = \frac{p_{\theta}(w_{t-1} | x_{t-1}) \cdot p_{\theta}(x_{t-1} | x_t)}{p_{\theta}(w_{t-1} | x_t)} \\
+& = \frac{p_{\theta}(w_{t-1} | x_{t-1}) \cdot p_{\theta}(x_{t-1} | x_t)}{\int p_{\theta}(w_{t-1} | x_{t-1}) \cdot p_{\theta}(x_{t-1} | x_t) d x_{t-1}}, \\
+& = \frac{\operatorname{Cat}(w_{t-1}; \operatorname{softmax}(\frac{E x_{t-1}}{\mathcal{T}})) \mathcal{N}(x_{t-1}; m_{t-1}^{\theta}, \sigma_{t-1}^{2})}{\operatorname{Cat}(w_{t-1}; \hat{\pi}_{t-1}^{\theta})}
+\end{aligned}
 $$
 where
+$$
+\begin{aligned}
+m_{t-1}^{q} := x_t + f(\tau(t), x_t, x_0)\,\Delta t, \quad
+m_{t-1}^{\theta} := x_t + f(\tau(t), x_t, \hat{y}_\theta)\,\Delta t, \quad
+\sigma_{t-1}^2 := g(\tau(t), x_t)^2\,\Delta t, \\
+\end{aligned}
+$$
+and 
+$$
+\begin{aligned}
+\hat{\pi}_{t-1, k}^{q}
+&:= \operatorname{softmax}\!\left(
+\frac{E\, m_{t-1}^{q}}{\mathcal{T}} \oslash \sqrt{ 1 + \frac{\pi}{8} \frac{\sigma_{t-1}^2 \|e_k\|^2}{\mathcal{T}^2} } \right), \\
+\hat{\pi}_{t-1, k}^{\theta}
+&:= \operatorname{softmax}\!\left(
+\frac{E\, m_{t-1}^{\theta}}{\mathcal{T}} \oslash \sqrt{ 1 + \frac{\pi}{8} \frac{\sigma_{t-1}^2 \|e_k\|^2}{\mathcal{T}^2} } \right).
+\end{aligned}
+$$By the chain rule of KL Divergence,
+$$
+\begin{aligned}
+D_{\mathrm{KL}} \bigl(
+q || p_{\theta}
+\bigr)
+& = D_{KL} \bigl( q(w_{t-1} | x_{t-1}) || p_{\theta}(w_{t-1} | x_{t-1}) \bigr) 
++ D_{KL} \bigl( q(x_{t-1} | x_{t}, x_{0}) || p_{\theta}(x_{t-1} | x_{t}) \bigr)
+- D_{KL} \bigl( q(w_{t-1} | x_{t}, x_{0}) || p_{\theta}(w_{t-1} | x_{t}) \bigr) \\
+& = \frac{|| m_{t-1}^{q} - m_{t-1}^{\theta} ||}{2 \sigma_{t-1}^2} 
+- \sum_{k=1}^{K}
+\hat{\pi}_{t-1,k}^{q} \log \frac{\hat{\pi}_{t-1,k}^{q}}{\hat{\pi}_{t-1,k}^{\theta}}
+\end{aligned}
+$$
+##### Method 2: Gaussian Stein
+
+Recall that by Bayesian rule expansion provided in Method 1: KL Divergence Chain Rule, the $q$ and $p_{\theta}$ are
+$$
+\begin{aligned}
+q(x_{t-1} | w_{t-1}=e_k, x_t, x_0) 
+& = \frac{\operatorname{softmax}_{k}(\frac{E x_{t-1}}{\mathcal{T}}) \mathcal{N}(x_{t-1}; m_{t-1}^{q}, \sigma_{t-1}^2)}{\hat{\pi}_{t-1, k}^{q}} \\
+& = \frac{1}{\hat{\pi}_{t-1, k}^{q}} \mathbb{E}_{x_{t-1} \sim \mathcal{N}(m_{t-1}^{q}, \sigma_{t-1}^2 I)} \left[ \operatorname{softmax}_{k}(\frac{E x_{t-1}}{\mathcal{T}})\right]
+\end{aligned}
+$$
+$$
+\begin{aligned}
+p_{\theta}(x_{t-1} | w_{t-1} = e_k, x_t)
+& = \frac{\operatorname{softmax}_{k}(\frac{E x_{t-1}}{\mathcal{T}}) \mathcal{N}(x_{t-1}; m_{t-1}^{\theta}, \sigma_{t-1}^2)}{\hat{\pi}_{t-1, k}^{\theta}} \\
+& = \frac{1}{\hat{\pi}_{t-1, k}^{\theta}} \mathbb{E}_{x_{t-1} \sim \mathcal{N}(m_{t-1}^{\theta}, \sigma_{t-1}^2 I)} \left[ \operatorname{softmax}_{k}(\frac{E x_{t-1}}{\mathcal{T}})\right] \\
+\end{aligned}
+$$
+
+The KL divergence between them is
+$$
+\begin{aligned}
+D_{KL}(q(x_{t-1} | w_{t-1}, x_t, x_0) || p_{\theta}(x_{t-1} | w_{t-1}, x_t))
+& = \int_{x_{t-1}} \int_{x_{t}} \int_{x_{0}} \sum_{w_{t-1}} q(x_{t-1} | w_{t-1}, x_t, x_0) \log \frac{q(x_{t-1} | w_{t-1}, x_t, x_0)}{p_{\theta}(x_{t-1} | w_{t-1}, x_t)}
+\end{aligned}
+$$
+**Gaussian Stein Identity Overview**
+Stein's method (Stein 1972, Chen et al. Ch. 2) rests on one key fact: if $W \sim \mathcal{N}(0, 1)$, then
+$$
+\mathbb{E}[f'(W)] = \mathbb{E}[W f(W)]
+$$
+for every absolutely continuous $f$ with $\mathbb{E}|f'(W)| < \infty$, and conversely this identity *characterizes* the standard normal. The proof is a single integration by parts: $\int w f(w) e^{-w^2/2} dw = -\int f(w)\, d(e^{-w^2/2}) = \int f'(w) e^{-w^2/2} dw$.
+
+**General Gaussian Stein Identity.** Let $p(x) = \mathcal{N}(x;\, m,\, \sigma^2 I_d)$, $m \in \mathbb{R}^d$, $\sigma > 0$. For any differentiable $h: \mathbb{R}^d \to \mathbb{R}$ satisfying $|h(x)|, \|\nabla_x h(x)\| = o(e^{\|x-m\|^2/(2\sigma^2)})$ as $\|x\| \to \infty$ (i.e. $h$ and $\nabla h$ grow slower than the Gaussian density decays — polynomial growth or bounded $h$ is more than enough), the first-order Gaussian Stein identity states
+$$
+\boxed{\mathbb{E}_{x \sim p}\!\left[(x - m)\, h(x)\right] = \sigma^2\, \mathbb{E}_{x \sim p}\!\left[\nabla_x h(x)\right].}
+$$
+Both sides are $d$-dimensional vectors. We prove this component-wise: for each $i \in \{1, \dots, d\}$,
+$$
+\mathbb{E}_p[(x_i - m_i)\, h(x)] = \sigma^2\, \mathbb{E}_p[\partial_i h(x)]. \tag{$\ast_i$}
+$$
+Furthermore, the second-order Gaussian Stein identity states
+$$
+\boxed{\mathbb{E}_{x \sim p}\!\left[(x - m) (x - m)^{\top} h(x)\right] = \sigma^2 I_d + \sigma^2\, \mathbb{E}_{x \sim p} \left[(x - m) (\nabla_x h(x))^\top\right].}
+$$
+
+> Proof: Gaussian integration by parts
+
+**Key observation (prior score).** The density $p(x) = (2\pi\sigma^2)^{-d/2} \exp(-\|x-m\|^2 / (2\sigma^2))$ satisfies
+$$
+\partial_i p(x) = -\frac{x_i - m_i}{\sigma^2}\, p(x)
+\quad\Longleftrightarrow\quad
+(x_i - m_i)\, p(x) = -\sigma^2\, \partial_i p(x). \tag{$\dagger$}
+$$
+Multiplying by $(x_i - m_i)$ under a Gaussian is the same, up to $-\sigma^2$, as differentiating the density.
+
+**Integration by parts.** Substitute $(\dagger)$ into the LHS of $(\ast_i)$:
+$$
+\mathbb{E}_p[(x_i - m_i) h(x)] = \int_{\mathbb{R}^d} (x_i - m_i)\, h(x)\, p(x)\, 
+dx = -\sigma^2 \int_{\mathbb{R}^d} h(x)\, \partial_i p(x)\, dx.
+$$
+Split $x = (x_i, x_{-i})$ via Fubini and integrate by parts in $x_i$:
+$$
+\int_{-\infty}^{\infty} h\, \partial_i p\, dx_i = \bigl[h(x)\, p(x)\bigr]_{x_i = -\infty}^{x_i = +\infty} - \int_{-\infty}^{\infty} (\partial_i h)\, p\, dx_i.
+$$
+The boundary term vanishes: as $|x_i| \to \infty$, $p(x) \lesssim e^{-x_i^2/(2\sigma^2)}$ while $|h(x)| = o(e^{\|x-m\|^2/(2\sigma^2)})$, so $h(x) p(x) \to 0$. Hence
+ $$
+\int_{\mathbb{R}^d} h(x)\, \partial_i p(x)\, dx = -\int_{\mathbb{R}^d} (\partial_i h)\, p\, dx = -\mathbb{E}_p[\partial_i h(x)].
+$$
+Substituting back: $\mathbb{E}_p[(x_i - m_i) h(x)] = -\sigma^2 (-\mathbb{E}_p[\partial_i h]) = \sigma^2\, \mathbb{E}_p[\partial_i h(x)]$. Stack over $i = 1, \dots, d$ to get the vector identity.
+
+**Intuition.** The Gaussian score $\nabla_x \log p = -(x-m)/\sigma^2$ means that "$(x - m) \cdot$" acts as $-\sigma^2$ times a derivative on the density. Integration by parts moves that derivative onto $h$, with a sign flip, producing $+\sigma^2 \nabla h$. Equivalently, let $Z := (x - m)/\sigma \sim \mathcal{N}(0, I_d)$ and $g(z) := h(m + \sigma z)$. Then $\nabla_z g = \sigma \nabla_x h$ and the standard Stein identity $\mathbb{E}[Z g(Z)] = \mathbb{E}[\nabla_z g(Z)]$ gives $\mathbb{E}_p[(x-m) h(x)] = \sigma \mathbb{E}[\nabla_z g] = \sigma^2 \mathbb{E}_p[\nabla_x h(x)]$.
+
+**Tilted (posterior) form.** Let $L: \mathbb{R}^d \to (0, \infty)$ be differentiable with $Z := \int p(x) L(x)\, dx < \infty$, and define $q(x) := \frac{1}{Z} p(x) L(x)$. Substituting $h(x) = L(x)/Z$ into the identity above yields
+
+**First order** (posterior mean):
+$$
+\mathbb{E}_{x \sim p}[(x - m) h(x)] = \mathbb{E}_{x \sim q}[x - m] = \sigma^2\, \mathbb{E}_{x \sim q}[\nabla_x \log L(x)].
+$$
+
+> Proof: first-order tilted Stein identity
+
+Set $h(x) = L(x)/Z$. Then $p(x)\, h(x) = q(x)$, so the LHS becomes $\mathbb{E}_q[x - m]$. For the RHS, $\nabla_x h(x) = \frac{\nabla L(x)}{Z} = \frac{L(x)}{Z} \nabla_x \log L(x)$, so $\mathbb{E}_p[\nabla h(x)] = \mathbb{E}_q[\nabla_x \log L(x)]$.
+
+**Second order** (posterior second moment): substituting $h(x) = (x_i - m_i) L(x)/Z$ into the base identity gives
+$$
+\mathbb{E}_{x \sim q}\!\left[(x - m)(x - m)^\top\right] = \sigma^2 I_d + \sigma^2\, \mathbb{E}_{x \sim q}\!\left[(x - m)\,(\nabla_x \log L(x))^\top\right].
+$$
+
+> Proof: second-order tilted Stein identity
+
+Set $h(x) = (x_i - m_i) L(x)/Z$. LHS: $\mathbb{E}_p[(x_j - m_j)(x_i - m_i) L(x)/Z] = \mathbb{E}_q[(x_j - m_j)(x_i - m_i)]$. RHS: $\sigma^2 \mathbb{E}_p[\partial_{x_j}((x_i - m_i) L(x)/Z)] = \sigma^2 \delta_{ji} + \sigma^2 \mathbb{E}_q[(x_i - m_i)\, \partial_{x_j} \log L(x)]$. Stacking over all $(j, i)$ yields the matrix identity.
+
+The posterior covariance follows by subtracting the outer product of the first-order identity:
+$$
+\operatorname{Cov}_q(x) = \sigma^2 I_d + \sigma^2\, \operatorname{Cov}_q\!\left(x,\, \nabla_x \log L(x)\right) - \sigma^4\, \mathbb{E}_q[\nabla_x \log L]\, \mathbb{E}_q[\nabla_x \log L]^\top.
+$$
+
+**Posterior by Gaussian Stein Identity**
+
+Let prior $\bar{p}(x_{t-1}) = \mathcal{N}(m_{t-1}^{q}, \sigma_{t-1}^2 I)$ and posterior $\bar{q}(x_{t-1}) = \mathcal{N}(\bar{m}_{t-1}^{q}, \bar{\Sigma}_{t-1}^{q})$, consider the posterior should match the Bayesian decomposition of $q(x_{t-1} | w_{t-1} = e_k, x_t, x_0)$
+
+$$
+\begin{aligned}
+\bar{q}(x_{t-1}) = \frac{1}{\bar{Z}} \bar{p}(x_{t-1}) L(x_{t-1}) 
+& = q(x_{t-1} | w_{t-1} = e_k, x_t, x_0) \\
+& = \frac{q(w_{t-1} = e_k | x_{t-1}) \cdot q(x_{t-1} | x_t, x_0)}{q(w_{t-1} = w_k | x_t, x_0)} \\
+& = \frac{1}{\hat{\pi}_{t-1, k}^{q}} \mathbb{E}_{x_{t-1} \sim \mathcal{N}(m_{t-1}^{q}, \sigma_{t-1}^2 I)} \left[ \operatorname{softmax}_{k}(\frac{E x_{t-1}}{\mathcal{T}})\right] \\
+\end{aligned}
+$$ 
+Therefore, $L(x_{t-1}) = q(w_{t-1} = e_k | x_{t-1}) = \operatorname{softmax}_k(\frac{E x_{t-1}}{\mathcal{T}})$, and $\bar{Z} = q(w_{t-1} = e_k | x_t, x_0) = \hat{\pi}_{t-1, k}^{q}$. Since
+$$
+\nabla_{x_{t-1}} \log L(x_{t-1}) = \nabla_{x_{t-1}} \log \operatorname{softmax}_k\!\left(\frac{E x_{t-1}}{\mathcal{T}}\right) = \frac{1}{\mathcal{T}} E^\top (e_k - \pi(x_{t-1})),
+$$
+where $\pi(x) := \operatorname{softmax}(Ex/\mathcal{T})$, applying the first and second-order tilted Stein identities gives:
+
+**Posterior mean** (first-order Stein):
+$$
+\begin{aligned}
+\bar{m}_{t-1}^{q} 
+& = \mathbb{E}_{q}\!\left[ x_{t-1} \right] 
+= m_{t-1}^{q} + \sigma_{t-1}^{2}\, \mathbb{E}_{q}\!\left[ \nabla_{x_{t-1}} \log L(x_{t-1}) \right] \\
+& = m_{t-1}^{q} + \frac{\sigma_{t-1}^{2}}{\mathcal{T}}\, E^\top \left( e_k - \mathbb{E}_{q}[\pi(x_{t-1})] \right).
+\end{aligned}
+$$
+This is exact but implicit: $\mathbb{E}_q[\pi(x_{t-1})]$ depends on $q$, which depends on $L$. In practice, approximate $\mathbb{E}_q[\pi(x_{t-1})] \approx \hat{\pi}_{t-1}^{q}$ (the probit approximation from the Discrete Denoising section), giving
+$$
+\bar{m}_{t-1}^{q} \approx m_{t-1}^{q} + \frac{\sigma_{t-1}^{2}}{\mathcal{T}}\, E^\top (e_k - \hat{\pi}_{t-1}^{q}).
+$$
+
+**Posterior second moment** (second-order Stein): Centered at prior mean $m_{t-1}^{q}$
+$$
+\begin{aligned}
+\mathbb{E}_{q}\!\left[(x_{t-1} - m_{t-1}^{q})(x_{t-1} - m_{t-1}^{q})^\top\right]
+& = \sigma_{t-1}^2 I_d + \sigma_{t-1}^2\, \mathbb{E}_{q}\!\left[(x_{t-1} - m_{t-1}^{q})\,(\nabla_{x_{t-1}} \log L)^\top\right] \\
+& = \sigma_{t-1}^2 I_d + \frac{\sigma_{t-1}^2}{\mathcal{T}}\, \mathbb{E}_{q}\!\left[(x_{t-1} - m_{t-1}^{q})\,(e_k - \pi(x_{t-1}))^\top\right] E.
+\end{aligned}
+$$
+
+**Posterior covariance:** subtracting $(\bar{m}_{t-1}^{q} - m_{t-1}^{q})(\bar{m}_{t-1}^{q} - m_{t-1}^{q})^\top$ from the second moment to center at posterior mean $\bar{m}_{t-1}^{q}$,
+$$
+\begin{aligned}
+\bar{\Sigma}_{t-1}^{q}
+& = \sigma_{t-1}^2 I_d 
++ \frac{\sigma_{t-1}^2}{\mathcal{T}}\, \operatorname{Cov}_{q}\!\left(x_{t-1},\; (e_k - \pi(x_{t-1}))^\top\right) E
+- \frac{\sigma_{t-1}^4}{\mathcal{T}^2}\, E^\top (e_k - \mathbb{E}_q[\pi(x_{t-1})])(e_k - \mathbb{E}_q[\pi(x_{t-1})])^\top E.
+\end{aligned}
+$$
+The first term $\sigma_{t-1}^2 I_d$ is the prior covariance. The second term is the covariance coupling between $x_{t-1}$ and the softmax residual $(e_k - \pi)$ — it captures how observing category $k$ reshapes the spread. The third term subtracts the mean shift squared.
+
+**Small-step simplification.** When $\Delta t$ is small, $\sigma_{t-1}^2 = g_t^2 \Delta t \ll 1$. The second- and third-order terms (both $\propto \sigma_{t-1}^4$ or higher after expanding the covariance) become negligible relative to $\sigma_{t-1}^2 I_d$, so
+$$
+\bar{\Sigma}_{t-1}^{q} \approx \sigma_{t-1}^2 I_d.
+$$
+The categorical observation barely changes the covariance at small step sizes — it primarily shifts the mean.
+
+**Learned Posterior by Gaussian Stein Identity**
+
+Similarly, let prior $\bar{p}_{\theta}(x_{t-1}) = \mathcal{N}(m_{t-1}^{\theta}, \sigma_{t-1}^2 I)$ and posterior $\bar{q}_{\theta}(x_{t-1}) = \mathcal{N}(\bar{m}_{t-1}^{\theta}, \bar{\Sigma}_{t-1}^{\theta})$. The learned posterior matches the Bayesian decomposition of $p_{\theta}(x_{t-1} | w_{t-1} = e_k, x_t)$:
+
+$$
+\begin{aligned}
+\bar{q}_{\theta}(x_{t-1}) = \frac{1}{\bar{Z}_{\theta}} \bar{p}_{\theta}(x_{t-1}) L(x_{t-1}) 
+& = p_{\theta}(x_{t-1} | w_{t-1} = e_k, x_t) \\
+& = \frac{p_{\theta}(w_{t-1} = e_k | x_{t-1}) \cdot p_{\theta}(x_{t-1} | x_t)}{p_{\theta}(w_{t-1} = e_k | x_t)},
+\end{aligned}
+$$
+with the same likelihood $L(x_{t-1}) = \operatorname{softmax}_k(E x_{t-1}/\mathcal{T})$ and normalizer $\bar{Z}_{\theta} = \hat{\pi}_{t-1,k}^{\theta}$.
+
+The learned posterior mean (first-order Stein):
+$$
+\begin{aligned}
+\bar{m}_{t-1}^{\theta} 
+& = \mathbb{E}_{\bar{q}_{\theta}} \left[ x_{t-1} \right] 
+= m_{t-1}^{\theta} + \sigma_{t-1}^{2}\, \mathbb{E}_{\bar{q}_{\theta}} \left[ \nabla_{x_{t-1}} \log L(x_{t-1}) \right] \\
+& = m_{t-1}^{\theta} + \frac{\sigma_{t-1}^{2}}{\mathcal{T}}\, E^\top \left( e_k - \mathbb{E}_{\bar{q}_{\theta}}[\pi(x_{t-1})] \right).
+\end{aligned}
+$$
+In practice, approximate $\mathbb{E}_{\bar{q}_{\theta}}[\pi(x_{t-1})] \approx \hat{\pi}_{t-1}^{\theta}$ (the probit approximation from the Discrete Denoising section), giving
+$$
+\bar{m}_{t-1}^{\theta} \approx m_{t-1}^{\theta} + \frac{\sigma_{t-1}^{2}}{\mathcal{T}}\, E^\top (e_k - \hat{\pi}_{t-1}^{\theta}).
+$$
+
+The learned posterior second moment (second-order Stein), centered at prior mean $m_{t-1}^{\theta}$:
+$$
+\begin{aligned}
+\mathbb{E}_{\bar{q}_{\theta}} \left[(x_{t-1} - m_{t-1}^{\theta})(x_{t-1} - m_{t-1}^{\theta})^\top\right]
+& = \sigma_{t-1}^2 I_d + \sigma_{t-1}^2\, \mathbb{E}_{\bar{q}_{\theta}} \left[(x_{t-1} - m_{t-1}^{\theta}) (\nabla_{x_{t-1}} \log L)^\top\right] \\
+& = \sigma_{t-1}^2 I_d + \frac{\sigma_{t-1}^2}{\mathcal{T}}\, \mathbb{E}_{\bar{q}_{\theta}} \left[(x_{t-1} - m_{t-1}^{\theta}) (e_k - \pi(x_{t-1}))^\top\right] E.
+\end{aligned}
+$$
+
+The learned posterior covariance, subtracting $(\bar{m}_{t-1}^{\theta} - m_{t-1}^{\theta})(\bar{m}_{t-1}^{\theta} - m_{t-1}^{\theta})^\top$ from the second moment:
+$$
+\begin{aligned}
+\bar{\Sigma}_{t-1}^{\theta}
+& = \sigma_{t-1}^2 I_d 
++ \frac{\sigma_{t-1}^2}{\mathcal{T}}\, \operatorname{Cov}_{\bar{q}_{\theta}} \left(x_{t-1},\; (e_k - \pi(x_{t-1}))^\top\right) E
+- \frac{\sigma_{t-1}^4}{\mathcal{T}^2}\, E^\top (e_k - \mathbb{E}_{\bar{q}_{\theta}}[\pi])(e_k - \mathbb{E}_{\bar{q}_{\theta}}[\pi])^{\top} E.
+\end{aligned}
+$$
+Under the small-step regime ($\sigma_{t-1}^2 = g_t^2 \Delta t \ll 1$), the correction terms are $O(\sigma_{t-1}^4)$, so
+$$
+\bar{\Sigma}_{t-1}^{\theta} \approx \sigma_{t-1}^2 I_d.
+$$
+
+**KL Divergence by Gaussian Stein Identity**
+
+With the Stein-derived Gaussian approximations $\bar{q} \approx \mathcal{N}(\bar{m}_{t-1}^{q},\, \bar{\Sigma}_{t-1}^{q})$ and $\bar{q}_\theta \approx \mathcal{N}(\bar{m}_{t-1}^{\theta},\, \bar{\Sigma}_{t-1}^{\theta})$, the refinement KL becomes a standard Gaussian KL:
+$$
+\begin{aligned}
+L_{\text{Refinement}}
+& = \sum_{t=2}^T \mathbb{E}_{q(w_{t-1}, x_t, x_0 \mid w_0)} D_{\mathrm{KL}}\!\bigl(\bar{q} \;\|\; \bar{q}_\theta\bigr) \\
+& = \sum_{t=2}^T \mathbb{E}_{q(w_{t-1}, x_t, x_0 \mid w_0)} \frac{1}{2}\bigg[
+\operatorname{tr}\!\Big((\bar{\Sigma}_{t-1}^{\theta})^{-1} \bar{\Sigma}_{t-1}^{q}\Big) - d + \log \frac{\det \bar{\Sigma}_{t-1}^{\theta}}{\det \bar{\Sigma}_{t-1}^{q}} + \delta_t^\top (\bar{\Sigma}_{t-1}^{\theta})^{-1} \delta_t
+\bigg],
+\end{aligned}
+$$
+where $\delta_t := \bar{m}_{t-1}^{\theta} - \bar{m}_{t-1}^{q}$.
+
+**Small-step simplification.** Under $\sigma_{t-1}^2 = g_t^2 \Delta t \ll 1$, both covariances reduce to $\bar{\Sigma}_{t-1}^{q} \approx \bar{\Sigma}_{t-1}^{\theta} \approx \sigma_{t-1}^2 I_d$. The trace and log-det terms cancel, leaving
+$$
+L_{\text{Refinement}} \approx \sum_{t=2}^T \mathbb{E}_{q(w_{t-1}, x_t, x_0 \mid w_0)} \frac{\|\delta_t\|^2}{2\sigma_{t-1}^2}.
+$$
+Substituting the probit-approximated means $\bar{m}_{t-1}^{q} \approx m_{t-1}^{q} + \frac{\sigma_{t-1}^2}{\mathcal{T}} E^\top(e_k - \hat{\pi}_{t-1}^{q})$ and $\bar{m}_{t-1}^{\theta} \approx m_{t-1}^{\theta} + \frac{\sigma_{t-1}^2}{\mathcal{T}} E^\top(e_k - \hat{\pi}_{t-1}^{\theta})$,
+$$
+\delta_t = \underbrace{(m_{t-1}^{\theta} - m_{t-1}^{q})}_{\text{drift mismatch}} + \underbrace{\frac{\sigma_{t-1}^2}{\mathcal{T}}\, E^\top(\hat{\pi}_{t-1}^{q} - \hat{\pi}_{t-1}^{\theta})}_{\text{discrete feedback}\; O(\Delta t)},
+$$
+so
+$$
+L_{\text{Refinement}} \approx \sum_{t=2}^T \mathbb{E}_{q(w_{t-1}, x_t, x_0 \mid w_0)} \frac{1}{2\sigma_{t-1}^2} \left\| (m_{t-1}^{\theta} - m_{t-1}^{q}) + \frac{\sigma_{t-1}^2}{\mathcal{T}}\, E^\top(\hat{\pi}_{t-1}^{q} - \hat{\pi}_{t-1}^{\theta}) \right\|^2.
+$$
+
+##### Method 3: Laplace Approximation Method
+###### **Overview**
+Consider an unnormalized density $p(x) \propto e^{f(x)}$ with mode $x^*$, so $\nabla f(x^*)=0$. A second-order Taylor expansion around $x^*$ gives
+$$
+f(x) \approx f(x^*) + \frac{1}{2}(x-x^*)^\top H_f(x^*)(x-x^*),
+$$
+where $H_f(x^*)$ is the Hessian of $f$ at the mode. Hence, we can derive an approximation for $p(x)$
+$$
+p(x) \approx \mathcal{N}\!\bigl(x^*,\, (-H_f(x^*))^{-1}\bigr),
+$$
+provided $H_f(x^*) \prec 0$.
+###### **Finding Mode (Local Minima / Maxima)**
+
+Consider
+$$
+q(x_{t-1}\mid w_{t-1}=e_k, x_t, x_0)
+\propto
+q(w_{t-1}=e_k\mid x_{t-1})\, q(x_{t-1}\mid x_t, x_0).
+$$
+Since the normalizing term $q(w_{t-1}=e_k\mid x_t,x_0)$ does not depend on $x_{t-1}$, which has no effect when we derive the Hessian and derivative to $x_{t-1}$,
+$$
+\begin{aligned}
+\nabla_{x_{t-1}} \log q(x_{t-1}\mid w_{t-1}=e_k, x_t, x_0)
+&=
+\nabla_{x_{t-1}} \log q(w_{t-1}=e_k\mid x_{t-1})
++
+\nabla_{x_{t-1}} \log q(x_{t-1}\mid x_t, x_0).
+\end{aligned}
+$$
+Let
+$$
+\begin{aligned}
+\eta(x_{t-1}) := \frac{E x_{t-1}}{\mathcal T},
+\qquad
+\pi(x_{t-1}) := \operatorname{softmax}(\eta(x_{t-1})).
+\end{aligned}
+$$
+Therefore, the log derivative is
+$$
+\nabla_{x_{t-1}} \log q(x_{t-1}\mid w_{t-1}=e_k, x_t, x_0)
+=
+\frac{1}{\mathcal T} E^\top\bigl(e_k - \pi(x_{t-1})\bigr)
+- \frac{1}{\sigma_{t-1}^2}(x_{t-1}-m_{t-1}^{q}).
+$$
+
+We fit a Gaussian at the mode of the log-posterior. The gradient of $\log(\text{softmax}_k(Ex/\mathcal{T}))$ is $\frac{1}{\mathcal{T}}E^\top(e_k - \pi)$ where $\pi = \operatorname{softmax}(Ex/\mathcal{T})$, so setting the total gradient to zero gives the **mode**:
+$$
+x^{*,q} = m_{t-1}^{q} + \frac{\sigma_{t-1}^2}{\mathcal{T}}\, E^\top(e_k - \pi^{*,q}), \qquad \pi^{*,q} := \operatorname{softmax}(E x^{*,q}/\mathcal{T}).
+$$
+This is a fixed-point equation, not a closed-form solution. In practice, one can compute it by fixed-point iteration
+$$
+x^{(n+1)}
+=
+m_{t-1}^{q}
+E^\top\!\left(e_k-\operatorname{softmax}(E x^{(n)}/\mathcal T)\right),
+\qquad
+x^{(0)} = m_{t-1}^{q},
+$$
+  or use the one-step approximation
+  $$
+  x^{*,q} \approx
+  m_{t-1}^{q}
+  +
+  \frac{\sigma_{t-1}^2}{\mathcal T}
+  E^\top\!\left(e_k-\operatorname{softmax}(E m_{t-1}^{q}/\mathcal T)\right).
+  $$
+> Proof: $x^{*,q} = m_{t-1}^{q} + \frac{\sigma_{t-1}^2}{\mathcal{T}}\, E^\top(e_k - \pi^{*,q})$
+
+Consider the log derivative to $x_{t-1}$ is
+$$
+\begin{aligned}
+\nabla_{x_{t-1}} \log q(x_{t-1}\mid w_{t-1}=e_k, x_t, x_0)
+&=
+\nabla_{x_{t-1}} \log q(w_{t-1}=e_k\mid x_{t-1})
++
+\nabla_{x_{t-1}} \log q(x_{t-1}\mid x_t, x_0).
+\end{aligned}
+$$
+The first term can be expanded as
+$$
+\log q(w_{t-1}=e_k\mid x_{t-1})
+=
+\log \pi_k(x_{t-1})
+=
+e_k^\top \eta(x_{t-1}) - \log \sum_{i=1}^{K} e^{\eta_i(x_{t-1})},
+$$
+so the log derivative
+$$
+\nabla_{x_{t-1}} \log q(w_{t-1}=e_k\mid x_{t-1})
+=
+\frac{1}{\mathcal T} E^\top\bigl(e_k - \pi(x_{t-1})\bigr).
+$$
+For the second term
+$$
+q(x_{t-1}\mid x_t, x_0) = \mathcal N(x_{t-1}; m_{t-1}^{q}, \sigma_{t-1}^2 I_d),
+$$
+we have log derivative
+$$
+\nabla_{x_{t-1}} \log q(x_{t-1}\mid x_t, x_0)
+=
+-\frac{1}{\sigma_{t-1}^2}(x_{t-1}-m_{t-1}^{q}).
+$$
+Therefore, the full log derivative is
+$$
+\nabla_{x_{t-1}} \log q(x_{t-1}\mid w_{t-1}=e_k, x_t, x_0)
+=
+\frac{1}{\mathcal T} E^\top\bigl(e_k - \pi(x_{t-1})\bigr)
+- \frac{1}{\sigma_{t-1}^2}(x_{t-1}-m_{t-1}^{q}).
+$$
+###### **Finding Precision (Negative Hessian)**
+
+The **precision** (negative Hessian) at the mode is
+$$
+\Lambda^q = \frac{1}{\sigma_{t-1}^2}\, I_d + \frac{1}{\mathcal{T}^2}\, E^\top F(\pi^{*,q})\, E,
+$$
+where $F(\pi) := \operatorname{diag}(\pi) - \pi\pi^\top \succeq 0$ is the Fisher information of the categorical distribution. The first term is the Gaussian precision; the second is the curvature added by the softmax observation. Together they give
+$$
+q(x_{t-1}\mid e_k, x_t, x_0) \approx \mathcal{N}\!\big(x^{*,q},\; (\Lambda^q)^{-1}\big).
+$$
+The same applies to the reverse process with $m_{t-1}^{\theta} := x_t + f(\tau(t), x_t, \hat{y}_\theta)\,\Delta t$:
+$$
+p_\theta(x_{t-1}\mid e_k, x_t) \approx \mathcal{N}\!\big(x^{*,\theta},\; (\Lambda^\theta)^{-1}\big),
+$$
 $$
 x^{*,\theta} = m_{t-1}^{\theta} + \frac{\sigma_{t-1}^2}{\mathcal{T}}\, E^\top(e_k - \pi^{*,\theta}), \qquad
 \Lambda^\theta = \frac{1}{\sigma_{t-1}^2}\, I_d + \frac{1}{\mathcal{T}^2}\, E^\top F(\pi^{*,\theta})\, E.
 $$
-##### Gaussian KL
-The refinement term becomes
+
+###### Result: Gaussian KL
+
+Both sides are now Gaussian, so
 $$
-\begin{aligned}
 L_{\text{Refinement}}
-& \approx \sum_{t=2}^T \mathbb{E}_{q(w_{t-1}, x_t, x_0 \mid w_0)} \frac{1}{2}\bigg[
+\approx \sum_{t=2}^T \mathbb{E}_{q(w_{t-1}, x_t, x_0 \mid w_0)} \frac{1}{2}\bigg[
 \operatorname{tr}\!\Big(\Lambda^\theta (\Lambda^q)^{-1}\Big) - d + \log \frac{\det \Lambda^q}{\det \Lambda^\theta} + \delta_t^\top \Lambda^\theta\, \delta_t
 \bigg],
-\end{aligned}
 $$
 where $\delta_t := x^{*,\theta} - x^{*,q}$.
-##### Small-step simplification
-When $\Delta t$ is small, $\frac{1}{\sigma_{t-1}^2} I_d$ dominates both precisions, so $\Lambda^q \approx \Lambda^\theta \approx \frac{1}{\sigma_{t-1}^2} I_d$. The trace and log-det cancel, leaving
+
+###### **Small-step simplification**
+
+When $\Delta t$ is small, $\sigma_{t-1}^2 = g_t^2 \Delta t$ is small, so the Gaussian precision $\frac{1}{\sigma_{t-1}^2} I_d$ dominates the softmax curvature in both $\Lambda^q$ and $\Lambda^\theta$. The precisions become approximately equal, the trace and log-det terms cancel, and we get
 $$
-L_{\text{Refinement}} \approx \sum_{t=2}^T \mathbb{E}_{q(w_{t-1}, x_t, x_0 \mid w_0)} \frac{1}{2\sigma_{t-1}^2} \left\|x^{*,\theta} - x^{*,q}\right\|^2.
+L_{\text{Refinement}} \approx \sum_{t=2}^T \mathbb{E}_{q(w_{t-1}, x_t, x_0 \mid w_0)} \frac{\left\|x^{*,\theta} - x^{*,q}\right\|^2}{2\sigma_{t-1}^2}.
 $$
-A single linearization step (evaluating $\pi$ at the Gaussian means) gives
+To keep it simple, if we use one-step approximation for the fixed-point equation, it gives
 $$
-x^{*,q} \approx m_{t-1}^{q} + \frac{\sigma_{t-1}^2}{\mathcal{T}}\, E^\top(e_k - \pi_0^{q}), \qquad x^{*,\theta} \approx m_{t-1}^{\theta} + \frac{\sigma_{t-1}^2}{\mathcal{T}}\, E^\top(e_k - \pi_0^{\theta}),
+x^{*,\theta} - x^{*,q} \approx \underbrace{(m_{t-1}^{\theta} - m_{t-1}^{q})}_{\text{drift mismatch}} + \underbrace{\frac{\sigma_{t-1}^2}{\mathcal{T}}\, E^\top(\pi_0^{q} - \pi_0^{\theta})}_{\text{discrete feedback}},
 $$
-where $\pi_0^{q} := \operatorname{softmax}(\mu_{t-1}^{q})$ and $\pi_0^{\theta} := \operatorname{softmax}(\mu_{t-1}^{\theta})$ use the logit-space means from the Discrete Denoising section. Therefore
-$$
-x^{*,\theta} - x^{*,q} = \underbrace{(m_{t-1}^{\theta} - m_{t-1}^{q})}_{\text{drift mismatch}} + \underbrace{\frac{\sigma_{t-1}^2}{\mathcal{T}}\, E^\top(\pi_0^{q} - \pi_0^{\theta})}_{\text{discrete feedback}}.
-$$
+where $\pi_0^{q} := \operatorname{softmax}(E m_{t-1}^{q}/\mathcal{T})$ and $\pi_0^{\theta} := \operatorname{softmax}(E m_{t-1}^{\theta}/\mathcal{T})$. The first term penalizes the drift mismatch between forward and reverse; the second is a correction from the induced discrepancy in softmax probabilities.
 #### Reconstruction $:L_{Reconstruction}$
-The reconstruction term marginalizes over the reverse transition at $t=1$:
+The reconstruction term calculate the reverse transition at $t=1$:
 $$
-\tilde p_\theta(w_0 \mid x_1)
-:= \int p_\theta(w_0 \mid x_0)\, p_\theta(x_0 \mid x_1)\, d x_0.
+p_\theta(w_0 \mid x_1)
+= \int p_\theta(w_0 \mid x_0)\, p_\theta(x_0 \mid x_1)\, d x_0.
 $$
 From the Euler-Gaussian approximation, $p_\theta(x_0 \mid x_1) = \mathcal{N}(x_0;\, m_0^{\theta},\, \sigma_0^2 I_d)$ with
 $$
 m_0^{\theta} := x_1 + f(\tau(1), x_1, \hat{y}_\theta)\,\Delta t, \qquad \sigma_0^2 := g(\tau(1), x_1)^2\,\Delta t.
 $$
-Since $z(x) = Ex/\mathcal{T}$ is linear, the logit is Gaussian: $z_0 \mid x_1 \sim \mathcal{N}(\mu_0^{\theta},\, \Sigma_0)$ with
+Therefore, if we expand the $p_\theta(w_0 \mid x_1)$ with diagonal probit approximation
 $$
-\mu_0^{\theta} := z(x_1) + \frac{E\, f(\tau(1), x_1, \hat{y}_\theta)}{\mathcal{T}}\,\Delta t, \qquad \Sigma_0 := \frac{g(\tau(1), x_1)^2}{\mathcal{T}^2}\, E E^\top\, \Delta t.
-$$
-Applying the diagonal probit approximation directly,
-$$
-\hat{\pi}_0
-:= \operatorname{softmax}\!\left(
+\begin{aligned}
+p_\theta(w_0 \mid x_1)
+& = \int p_\theta(w_0 \mid x_0) p_\theta(x_0 \mid x_1) d x_0 \\
+& = \int \operatorname{Cat}(w_0; \operatorname{softmax}(\frac{E x_0}{\mathcal{T}})) \cdot \mathcal{N}(x_0;\, m_0^{\theta},\, \sigma_0^2 I_d) d x_0 \\
+& \approx \operatorname{Cat} \left( w_0; \operatorname{softmax} \left(
 \mu_0^{\theta} \oslash \sqrt{ 1 + \tfrac{\pi}{8}\, \operatorname{diag}(\Sigma_0) }
-\right),
-\qquad
-\tilde p_\theta(w_0\mid x_1) \approx \text{Cat}(w_0;\,\hat{\pi}_0).
+\right) \right)
+\end{aligned}
 $$
-The reconstruction term is then
+where
+$$
+\mu_0^{\theta} := \frac{E x_1}{\mathcal{T}} + \frac{E\, f(\tau(1), x_1, \hat{y}_\theta)}{\mathcal{T}}\,\Delta t, \qquad \Sigma_0 := \frac{g(\tau(1), x_1)^2}{\mathcal{T}^2}\, E E^\top\, \Delta t.
+$$
+Consider the $p_{\theta}(w_0 | x_1)$ is categorical distribution, the reconstruction term is then
 $$
 L_{\text{Reconstruction}}
 \approx
 \mathbb E_{q(x_1\mid w_0)}
 \left[
-- \sum_{k=1}^{K} [w_0]_k \log \hat{\pi}_{0,k}
+- \log \sum_{i=1}^{K} [w_0]_i \operatorname{softmax}_i \left(
+\mu_0^{\theta} \oslash \sqrt{ 1 + \tfrac{\pi}{8}\, \operatorname{diag}(\Sigma_0) }
+\right) 
 \right].
 $$
-If $w_0$ is a one-hot class index $c_0$, this reduces to $-\log \hat{\pi}_{0,c_0}$.
+If $w_0$ is a one-hot vector $w_0 = e_k$ at class $k$, the summation over $K$ classes can be reduced to
+$$
+L_{\text{Reconstruction}}
+\approx
+\mathbb E_{q(x_1\mid w_0)}
+\left[
+- \log [w_0]_k \operatorname{softmax}_k \left(
+\mu_0^{\theta} \oslash \sqrt{ 1 + \tfrac{\pi}{8}\, \operatorname{diag}(\Sigma_0) }
+\right) 
+\right].
+$$
 #### Initial $:L_{Initial}$
 $$
 \begin{aligned}
