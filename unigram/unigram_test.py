@@ -11,11 +11,12 @@ It is designed to verify the inequality chain
     NELBO >= NLL >= H(Y)
 
 in the regime where both KL gaps should shrink.  The script trains with one
-of four objectives:
+of five objectives:
   - cross entropy surrogate
   - L2 surrogate
   - diffusion surrogate
   - full NELBO
+  - discrete NELBO
 
 Regardless of the training loss, the script always evaluates the NELBO
 separately and visualizes it against the dataset entropy over optimization
@@ -185,95 +186,6 @@ class ProposalGenerator:
         tau0 = torch.cat([tau.new_zeros(1), tau], dim=0)
         delta_tau = tau0[1:] - tau0[:-1]
         return ProposalSchedule(tau=tau, delta_tau=delta_tau)
-
-
-class UnigramDataset(Dataset):
-    """Exact unigram dataset with sequence length 1."""
-
-    def __init__(self, size: int, p_a: float, seed: int):
-        super().__init__()
-        n_a = int(round(size * p_a))
-        n_b = size - n_a
-        tokens = torch.cat(
-            [
-                torch.zeros(n_a, dtype=torch.long),
-                torch.ones(n_b, dtype=torch.long),
-            ]
-        )
-        generator = torch.Generator().manual_seed(seed)
-        permutation = torch.randperm(tokens.numel(), generator=generator)
-        self.tokens = tokens[permutation]
-
-    def __len__(self):
-        return self.tokens.numel()
-
-    def __getitem__(self, index: int):
-        return self.tokens[index]
-
-
-class UnigramDataModule(L.LightningDataModule):
-    def __init__(self, config: ExperimentConfig):
-        super().__init__()
-        self.config = config
-        self.train_dataset = None
-        self.val_dataset = None
-        self.test_dataset = None
-
-    def setup(self, stage: str | None = None):
-        del stage
-        self.train_dataset = UnigramDataset(
-            size=self.config.train_size, p_a=self.config.p_a, seed=self.config.seed
-        )
-        self.val_dataset = UnigramDataset(
-            size=self.config.val_size, p_a=self.config.p_a, seed=self.config.seed + 1
-        )
-        self.test_dataset = UnigramDataset(
-            size=self.config.val_size, p_a=self.config.p_a, seed=self.config.seed + 2
-        )
-
-    def train_dataloader(self):
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=True,
-            num_workers=self.config.num_workers,
-        )
-
-    def val_dataloader(self):
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=False,
-            num_workers=self.config.num_workers,
-        )
-
-    def test_dataloader(self):
-        return DataLoader(
-            self.test_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=False,
-            num_workers=self.config.num_workers,
-        )
-
-
-class SmallMLP(nn.Module):
-    """Tiny time-conditioned MLP that predicts a hyperbolic endpoint."""
-
-    def __init__(self, input_dim: int, hidden_size: int, depth: int, output_dim: int):
-        super().__init__()
-        layers = []
-        dim = input_dim
-        for _ in range(depth):
-            layers.append(nn.Linear(dim, hidden_size))
-            layers.append(nn.Tanh())
-            dim = hidden_size
-        layers.append(nn.Linear(dim, output_dim))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, z: torch.Tensor, t: torch.Tensor):
-        if t.ndim == 1:
-            t = t[:, None]
-        return self.net(torch.cat([z, t], dim=-1))
 
 
 class HyperbolicBridge(nn.Module):
@@ -631,17 +543,46 @@ class HyperbolicBridge(nn.Module):
         pred_n = self.normalize_endpoint(pred)
         mean_q, state_var = self._local_chart_transition_moments(z, y, delta_tau)
         mean_p, _ = self._local_chart_transition_moments(z, pred_n, delta_tau)
-        logits_mean_q, _ = self._logit_moments_from_state_moments(mean_q, state_var)
-        logits_mean_p, _ = self._logit_moments_from_state_moments(mean_p, state_var)
-        pi_q = logits_mean_q.softmax(dim=-1)
-        pi_p = logits_mean_p.softmax(dim=-1)
+        # Use the same approximate E[softmax(Ex / T)] moments as the discrete
+        # denoising term inside the Stein mean shift.
+        pi_q = self._approximate_discrete_transition_probs(
+            z, y, delta_tau, num_samples=0
+        )
+        pi_p = self._approximate_discrete_transition_probs(
+            z, pred_n, delta_tau, num_samples=0
+        )
+        endpoints = self.endpoints.to(device=z.device, dtype=z.dtype)
         feedback = (
             state_var / self.discrete_temperature
-        ) * ((pi_q - pi_p) @ self.endpoints.to(device=z.device, dtype=z.dtype))
+        ) * ((pi_q - pi_p) @ endpoints)
         delta = (mean_p - mean_q) + feedback
         return delta.square().sum(dim=-1) / (
             2.0 * state_var.squeeze(-1).clamp(min=1e-8)
         )
+
+    def discrete_initial_term(
+        self,
+        z: torch.Tensor,
+        y: torch.Tensor,
+        pred: torch.Tensor,
+        delta_tau: torch.Tensor | float,
+        num_samples: int,
+    ):
+        pred_n = self.normalize_endpoint(pred)
+        # In the unigram setup x_0 is the deterministic endpoint selected by
+        # w_0, so L_initial reduces to -log p_theta(x_0 = y | w_0, x_1).
+        # Using Bayes:
+        #   p_theta(y | w_0, x_1)
+        #   = p_theta(w_0 | y) p_theta(y | x_1) / p_theta(w_0 | x_1).
+        gaussian_nll = self.reconstruction_term(z, y, pred_n, delta_tau)
+        discrete_nll = self.discrete_reconstruction_term(
+            z, y, pred_n, delta_tau, num_samples=num_samples
+        )
+        targets = self.project_to_discrete(y).unsqueeze(-1)
+        endpoint_emission_nll = -self.endpoint_posterior(y).clamp(min=1e-8).log().gather(
+            -1, targets
+        ).squeeze(-1)
+        return gaussian_nll + endpoint_emission_nll - discrete_nll
 
 
 class EulerScheduler:
@@ -1135,8 +1076,12 @@ class UnigramHyperbolicDLM(L.LightningModule):
         discrete_recon = self.bridge.discrete_reconstruction_term(
             z_recon, y, pred_recon, delta_tau_recon, num_samples=discrete_mc_samples
         )
-        discrete_initial = self.bridge.discrete_refinement_term(
-            z_recon, y, pred_recon, delta_tau_recon
+        discrete_initial = self.bridge.discrete_initial_term(
+            z_recon,
+            y,
+            pred_recon,
+            delta_tau_recon,
+            num_samples=discrete_mc_samples,
         )
         _, recon_conf, recon_diff, recon_residual = self._reconstruction_residual_terms(
             z_recon, y, pred_recon, delta_tau_recon
@@ -1183,6 +1128,7 @@ class UnigramHyperbolicDLM(L.LightningModule):
             **diffusion_losses,
             "prior": prior,
             "nelbo": nelbo,
+            "dnelbo": discrete_nelbo,
             "discrete_nelbo": discrete_nelbo,
             **reconstruction_losses,
         }
@@ -1949,7 +1895,9 @@ def plot_history(model: UnigramHyperbolicDLM, output_path: Path):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--loss", choices=["ce", "l2", "diffusion", "nelbo"], default="nelbo"
+        "--loss",
+        choices=["ce", "l2", "diffusion", "nelbo", "dnelbo"],
+        default="nelbo",
     )
     parser.add_argument("--train-size", type=int, default=20_000)
     parser.add_argument("--val-size", type=int, default=4_000)

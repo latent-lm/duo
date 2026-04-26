@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from omegaconf import DictConfig, OmegaConf
 import hydra
 import numpy as np
@@ -8,11 +10,11 @@ import lightning as L
 try:
     from unigram.model import MLPLM
     from unigram.dataset import UnigramDataModule
-    from unigram.visualizer import Recorder, plot_loss_curves
+    from unigram.visualizer import DataMgr, Recorder
 except ModuleNotFoundError:
     from model import MLPLM
     from dataset import UnigramDataModule
-    from visualizer import Recorder, plot_loss_curves
+    from visualizer import DataMgr, Recorder
 
 class HyperBridge:
     @staticmethod
@@ -80,6 +82,10 @@ class HyperbolicDLM(L.LightningModule):
         self.bridge = HyperBridge()
         self.recorder = Recorder()
         self._test_step_offset = 0
+        self._val_epoch_loss_total = 0.0
+        self._val_epoch_weight = 0
+        self._test_epoch_loss_total = 0.0
+        self._test_epoch_weight = 0
         if int(config.hyper_dim) != 2:
             raise ValueError("unigram_test2.py expects hyper_dim=2 for polar coordinates.")
 
@@ -146,30 +152,54 @@ class HyperbolicDLM(L.LightningModule):
         del batch_idx
         losses = self._compute_losses(batch)
         loss = losses["loss"].mean()
-        self.recorder.add("val_loss", step=int(self.global_step), val=loss)
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("val_nelbo_loss", losses["nelbo_loss"].mean(), on_step=False, on_epoch=True)
-        self.log("val_ce", losses["ce"].mean(), on_step=False, on_epoch=True)
+        batch_size = int(batch.reshape(-1).shape[0])
+        if not self.trainer.sanity_checking:
+            self._val_epoch_loss_total += float(loss.detach().cpu()) * batch_size
+            self._val_epoch_weight += batch_size
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
+        self.log("val_nelbo_loss", losses["nelbo_loss"].mean(), on_step=False, on_epoch=True, batch_size=batch_size)
+        self.log("val_ce", losses["ce"].mean(), on_step=False, on_epoch=True, batch_size=batch_size)
         return loss
+
+    def on_validation_epoch_start(self):
+        self._val_epoch_loss_total = 0.0
+        self._val_epoch_weight = 0
+
+    def on_validation_epoch_end(self):
+        if self.trainer.sanity_checking or self._val_epoch_weight == 0:
+            return
+        mean_val_loss = self._val_epoch_loss_total / self._val_epoch_weight
+        self.recorder.add("val_loss", step=int(self.global_step), val=mean_val_loss)
 
     def on_test_start(self):
         self._test_step_offset = max(
             self.recorder.last_step("train_loss"),
             int(self.global_step),
         )
+        self._test_epoch_loss_total = 0.0
+        self._test_epoch_weight = 0
 
     def test_step(self, batch: torch.Tensor, batch_idx: int):
+        del batch_idx
         losses = self._compute_losses(batch)
         loss = losses["loss"].mean()
+        batch_size = int(batch.reshape(-1).shape[0])
+        self._test_epoch_loss_total += float(loss.detach().cpu()) * batch_size
+        self._test_epoch_weight += batch_size
+        self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
+        self.log("test_nelbo_loss", losses["nelbo_loss"].mean(), on_step=False, on_epoch=True, batch_size=batch_size)
+        self.log("test_ce", losses["ce"].mean(), on_step=False, on_epoch=True, batch_size=batch_size)
+        return loss
+
+    def on_test_epoch_end(self):
+        if self._test_epoch_weight == 0:
+            return
+        mean_test_loss = self._test_epoch_loss_total / self._test_epoch_weight
         self.recorder.add(
             "test_loss",
-            step=self._test_step_offset + int(batch_idx) + 1,
-            val=loss,
+            step=self._test_step_offset + 1,
+            val=mean_test_loss,
         )
-        self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("test_nelbo_loss", losses["nelbo_loss"].mean(), on_step=False, on_epoch=True)
-        self.log("test_ce", losses["ce"].mean(), on_step=False, on_epoch=True)
-        return loss
 
 @hydra.main(version_base=None)
 def main(cfg: DictConfig) -> None:
@@ -177,17 +207,22 @@ def main(cfg: DictConfig) -> None:
         {
             "vocab_size": 2,
             "hyper_dim": 2,
-            "hidden_size": 64,
+            "hidden_size": 128,
             "train_size": 20_000,
-            "depth": 2,
+            "depth": 3,
+            "hyper_T": 1000,
+            "hyper_dt": 0.01,
             "val_size": 4_000,
             "batch_size": 256,
-            "max_steps": 2_0000,
+            "max_steps": 2_000,
             "lr": 1e-5,
             "p_a": 0.8,
             "seed": 0,
             "num_workers": 0,
-            "loss_plot_path": "unigram_test2_losses.png",
+            "folder": "unigram_test2_losses_sp${max_steps}_lr${lr}",
+            "loss_plot_path": "plot.jpg",
+            "loss_data_path": "data.json",
+            "loss_plot_ma_window": None,
         }
     )
     cfg = OmegaConf.merge(defaults, cfg)
@@ -210,8 +245,15 @@ def main(cfg: DictConfig) -> None:
 
     trainer.fit(model, datamodule=datamodule)
     test_metrics = trainer.test(model, datamodule=datamodule, verbose=False)
-    loss_plot_path = plot_loss_curves(model.recorder, cfg.loss_plot_path)
-    print(f"Saved loss plot to: {loss_plot_path}")
+    data_mgr = DataMgr(cfg.folder)
+    saved = data_mgr.save(
+        recorder=model.recorder,
+        data_file=cfg.loss_data_path,
+        fig_file=cfg.loss_plot_path,
+        moving_average_window=cfg.loss_plot_ma_window,
+    )
+    print(f"Saved loss data to: {saved['data_path']}")
+    print(f"Saved loss plot to: {saved['figure_path']}")
     if test_metrics:
         print("Test metrics:")
         for name, value in test_metrics[0].items():
