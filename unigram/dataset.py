@@ -5,22 +5,32 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
+def process_ps(ps):
+    if isinstance(ps, list) or isinstance(ps, tuple):
+        ps = torch.FloatTensor(ps)
+        sum_ps = ps.sum().item()
+        if len(ps) == 1 and sum_ps < 1.0:
+            ps = torch.concat(ps, torch.FloatTensor([1.0 - sum_ps]))
+    elif not torch.is_tensor(ps):
+        ext_ps = [ps] + [1.0 - ps]
+        ps = torch.FloatTensor(ext_ps)
+    return ps
+
 class UnigramDataset(Dataset):
     """Exact unigram dataset with sequence length 1."""
 
-    def __init__(self, size: int, p_a: float, seed: int):
+    def __init__(self, size: int, ps: float, seed: int):
         super().__init__()
-        n_a = int(round(size * p_a))
-        n_b = size - n_a
-        tokens = torch.cat(
-            [
-                torch.zeros(n_a, dtype=torch.long),
-                torch.ones(n_b, dtype=torch.long),
-            ]
-        )
+
+        ps = process_ps(ps)
+
+        token_repeat_times = float(size) * ps
+        tokens = torch.arange(n_token, dtype=torch.long)
+        perm_indice = torch.repeat_interleave(tokens, token_repeat_times)
+
         generator = torch.Generator().manual_seed(seed)
-        permutation = torch.randperm(tokens.numel(), generator=generator)
-        self.tokens = tokens[permutation]
+        rand_perm = torch.randperm(perm_indice.numel(), generator=generator)
+        self.tokens = tokens[perm_indice[rand_perm]]
 
     def __len__(self):
         return self.tokens.numel()
@@ -37,20 +47,24 @@ class UnigramDataModule(L.LightningDataModule):
         self.test_dataset = None
         print(f"Entropy: {self.entropy(p=self.config.p_a)}")
 
-    def entropy(self, p: float):
-        p = torch.FloatTensor([p])
-        return - (p * torch.log(p) + (1.0 - p) * torch.log((1.0 - p)))
+    # def entropy(self, p: float):
+    #     p = torch.FloatTensor([p])
+    #     return - (p * torch.log(p) + (1.0 - p) * torch.log((1.0 - p)))
+
+    def entropy(self, ps):
+        ps = process_ps(ps)
+        return - (ps * torch.log(ps)).sum()
 
     def setup(self, stage: str | None = None):
         del stage
         self.train_dataset = UnigramDataset(
-            size=self.config.train_size, p_a=self.config.p_a, seed=self.config.seed
+            size=self.config.train_size, ps=self.config.ps, seed=self.config.seed
         )
         self.val_dataset = UnigramDataset(
-            size=self.config.val_size, p_a=self.config.p_a, seed=self.config.seed + 1
+            size=self.config.val_size, ps=self.config.ps, seed=self.config.seed + 1
         )
         self.test_dataset = UnigramDataset(
-            size=self.config.val_size, p_a=self.config.p_a, seed=self.config.seed + 2
+            size=self.config.val_size, ps=self.config.ps, seed=self.config.seed + 2
         )
 
     def train_dataloader(self):

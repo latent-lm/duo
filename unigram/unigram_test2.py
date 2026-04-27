@@ -17,6 +17,9 @@ except ModuleNotFoundError:
     from visualizer import DataMgr, Recorder
 
 class HyperBridge:
+    PROPOSAL_EXP_NAME: str = "exp"
+    PROPOSAL_UNIF_NAME: str = "unif"
+
     @staticmethod
     def sample_chi(ns,dtype=torch.float64):
         nshape = ns.shape
@@ -28,7 +31,7 @@ class HyperBridge:
 
     @staticmethod
     @torch.no_grad()
-    def bbridge(ts):
+    def binary_bridge(ts):
         ns = torch.poisson(ts/8).to(torch.int64)
         ss = ts.sqrt() * HyperBridge.sample_chi(2*ns+3, ts.dtype)
         vs = torch.rand_like(ts)
@@ -42,7 +45,7 @@ class HyperBridge:
     # rhos          (N,)      float64
     # thetas        (N,)      float64
     @staticmethod
-    def bridge_loss(logits, targets, rhos, thetas):
+    def binary_bridge_loss(logits, targets, rhos, thetas):
         (N,) = targets.shape
         (N,V) = logits.shape
         device = rhos.device
@@ -71,8 +74,81 @@ class HyperBridge:
         return (cos_errors.square() + sin_errors.square())/2
 
     @staticmethod
-    def nelbo_loss(logits, targets, rhos, thetas, t_max, t_min):
-        return HyperBridge.bridge_loss(logits=logits, targets=targets, rhos=rhos, thetas=thetas) * (t_max - t_min)
+    def binary_nelbo_loss(logits, targets, rhos, thetas, proposal_weight):
+        bridge = HyperBridge.binary_bridge_loss(
+            logits=logits,
+            targets=targets,
+            rhos=rhos,
+            thetas=thetas,
+        )
+        return bridge * proposal_weight.to(dtype=bridge.dtype)
+
+    @staticmethod
+    def proposal(
+        proposal_type: str,
+        shape,
+        device,
+        dtype,
+        unif_min: float,
+        unif_max: float,
+        exp_rate: float,
+    ):
+        proposal_type = proposal_type.lower()
+        interval = float(unif_max - unif_min)
+        if interval < 0:
+            raise ValueError("proposal requires unif_max >= unif_min")
+
+        if proposal_type == HyperBridge.PROPOSAL_UNIF_NAME:
+            ts = unif_min + interval * torch.rand(shape, device=device, dtype=dtype)
+            weights = torch.full_like(ts, interval)
+            return ts, weights
+        elif proposal_type == HyperBridge.PROPOSAL_EXP_NAME:
+            if exp_rate <= 0:
+                raise ValueError("proposal_exp_rate must be > 0")
+            if interval == 0:
+                ts = torch.full(shape, unif_min, device=device, dtype=dtype)
+                return ts, torch.zeros_like(ts)
+            u = torch.rand(shape, device=device, dtype=dtype).clamp(
+                min=1e-12,
+                max=1 - 1e-12,
+            )
+            normalizer = 1 - torch.exp(
+                torch.tensor(-exp_rate * interval, device=device, dtype=dtype)
+            )
+            ts = unif_min - torch.log1p(-u * normalizer) / exp_rate
+            density = exp_rate * torch.exp(-exp_rate * (ts - unif_min)) / normalizer
+            return ts, density.reciprocal()
+        else:
+            raise NotImplementedError(f"proposal_type={proposal_type} is not implemented.")
+
+    @staticmethod
+    def hyper_proposal(
+        proposal_type: str,
+        shape,
+        device,
+        dtype,
+        dt: float = 0.01,
+        T: int = 1000,
+        exp_rate: float = 1.0,
+    ):
+        if dt is None or T is None or dt <= 0.0 or T <= 0:
+            raise ValueError("dt and T must be positive for hyper_proposal.")
+
+        total_time = dt * T
+        unif_min = float(max(dt, 1e-8))
+        unif_max = float(max(total_time, unif_min))
+
+        ts, proposal_weight = HyperBridge.proposal(
+            proposal_type=proposal_type,
+            shape=shape,
+            device=device,
+            dtype=dtype,
+            unif_min=unif_min,
+            unif_max=unif_max,
+            exp_rate=exp_rate,
+        )
+        return ts, proposal_weight
+        
 
 class HyperbolicDLM(L.LightningModule):
     def __init__(self, config: DictConfig):
@@ -103,24 +179,26 @@ class HyperbolicDLM(L.LightningModule):
         targets = batch.reshape(-1).to(device=self.device, dtype=torch.long)
         batch_size = targets.shape[0]
 
-        dt = float(getattr(self.config, "hyper_dt", 1.0))
-        total_time = float(getattr(self.config, "hyper_T", 1)) * dt
-        t_min = max(dt, 1e-8)
-        t_max = max(total_time, t_min)
-        ts = torch.rand(batch_size, device=self.device, dtype=torch.float64)
-        ts = t_min + (t_max - t_min) * ts
+        ts, proposal_weight = self.bridge.hyper_proposal(
+            proposal_type=self.config.proposal_type,
+            shape=(batch_size,),
+            device=self.device,
+            dtype=torch.float64,
+            dt=self.config.hyper_dt,
+            T=self.config.hyper_T,
+            exp_rate=self.config.proposal_exp_rate,
+        )
 
-        rhos, thetas = self.bridge.bbridge(ts=ts)
+        rhos, thetas = self.bridge.binary_bridge(ts=ts)
         # Feed the bridge perturbations directly in polar coordinates.
         z = torch.stack([rhos, thetas], dim=-1).to(dtype=torch.float32)
         logits = self.model(z=z, t=ts.to(dtype=torch.float32))
-        nelbo = self.bridge.nelbo_loss(
+        nelbo = self.bridge.binary_nelbo_loss(
             logits=logits,
             targets=targets,
             rhos=rhos,
             thetas=thetas,
-            t_max=t_max,
-            t_min=t_min,
+            proposal_weight=proposal_weight,
         )
         ce = torch.nn.functional.cross_entropy(logits, targets, reduction="none")
         return {
@@ -128,6 +206,7 @@ class HyperbolicDLM(L.LightningModule):
             "nelbo_loss": nelbo,
             "ce": ce,
             "ts": ts.to(dtype=torch.float32),
+            "proposal_weight": proposal_weight.to(dtype=torch.float32),
             "rhos": rhos.to(dtype=torch.float32),
             "thetas": thetas.to(dtype=torch.float32),
         }
@@ -205,7 +284,7 @@ class HyperbolicDLM(L.LightningModule):
 def main(cfg: DictConfig) -> None:
     defaults = OmegaConf.create(
         {
-            "vocab_size": 2,
+            "vocab_size": 3,
             "hyper_dim": 2,
             "hidden_size": 128,
             "train_size": 20_000,
@@ -215,11 +294,13 @@ def main(cfg: DictConfig) -> None:
             "val_size": 4_000,
             "batch_size": 256,
             "max_steps": 2_000,
+            "proposal_type": "exp",
+            "proposal_exp_rate": 1.0,
             "lr": 1e-5,
-            "p_a": 0.8,
+            "ps": [0.2, 0.2, 0.6],
             "seed": 0,
             "num_workers": 0,
-            "folder": "unigram_test2_losses_sp${max_steps}_lr${lr}",
+            "folder": "unigram_test2_losses_sp${max_steps}_lr${lr}_pt${proposal_type}_per${proposal_exp_rate}",
             "loss_plot_path": "plot.jpg",
             "loss_data_path": "data.json",
             "loss_plot_ma_window": None,
