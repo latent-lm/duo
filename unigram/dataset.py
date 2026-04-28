@@ -1,36 +1,49 @@
 import lightning as L
-import matplotlib.pyplot as plt
-import numpy as np
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
+
 def process_ps(ps):
-    if isinstance(ps, list) or isinstance(ps, tuple):
-        ps = torch.FloatTensor(ps)
-        sum_ps = ps.sum().item()
-        if len(ps) == 1 and sum_ps < 1.0:
-            ps = torch.concat(ps, torch.FloatTensor([1.0 - sum_ps]))
-    elif not torch.is_tensor(ps):
-        ext_ps = [ps] + [1.0 - ps]
-        ps = torch.FloatTensor(ext_ps)
-    return ps
+    ps = torch.as_tensor(ps, dtype=torch.float32).reshape(-1)
+    if ps.numel() == 1:
+        p = float(ps.item())
+        ps = torch.tensor([p, 1.0 - p], dtype=torch.float32)
+    if ps.numel() == 0:
+        raise ValueError("ps must contain at least one probability.")
+    if torch.any(ps < 0):
+        raise ValueError("ps must be non-negative.")
+    total = float(ps.sum().item())
+    if total <= 0.0:
+        raise ValueError("ps must sum to a positive value.")
+
+    ret_ps = ps / total
+    if not torch.all(ret_ps > 0):
+        raise ValueError(f"Every entry of ps should be > 0")
+    return ret_ps
+
+
+def counts_from_ps(size: int, ps: torch.Tensor) -> torch.Tensor:
+    expected = float(size) * ps
+    counts = expected.floor().to(torch.long)
+    remainder = int(size - counts.sum().item())
+    if remainder > 0:
+        order = (expected - counts.to(expected.dtype)).argsort(descending=True)
+        counts[order[:remainder]] += 1
+    return counts
 
 class UnigramDataset(Dataset):
     """Exact unigram dataset with sequence length 1."""
 
-    def __init__(self, size: int, ps: float, seed: int):
+    def __init__(self, size: int, ps, seed: int):
         super().__init__()
-
         ps = process_ps(ps)
-
-        token_repeat_times = float(size) * ps
-        tokens = torch.arange(n_token, dtype=torch.long)
-        perm_indice = torch.repeat_interleave(tokens, token_repeat_times)
+        counts = counts_from_ps(size=size, ps=ps)
+        tokens = torch.arange(ps.numel(), dtype=torch.long)
+        dataset = torch.repeat_interleave(tokens, counts)
 
         generator = torch.Generator().manual_seed(seed)
-        rand_perm = torch.randperm(perm_indice.numel(), generator=generator)
-        self.tokens = tokens[perm_indice[rand_perm]]
+        permutation = torch.randperm(dataset.numel(), generator=generator)
+        self.tokens = dataset[permutation]
 
     def __len__(self):
         return self.tokens.numel()
@@ -45,15 +58,11 @@ class UnigramDataModule(L.LightningDataModule):
         self.train_dataset = None
         self.val_dataset = None
         self.test_dataset = None
-        print(f"Entropy: {self.entropy(p=self.config.p_a)}")
-
-    # def entropy(self, p: float):
-    #     p = torch.FloatTensor([p])
-    #     return - (p * torch.log(p) + (1.0 - p) * torch.log((1.0 - p)))
+        print(f"Entropy: {self.entropy(self.config.ps)}")
 
     def entropy(self, ps):
         ps = process_ps(ps)
-        return - (ps * torch.log(ps)).sum()
+        return -(ps * torch.log(ps)).sum()
 
     def setup(self, stage: str | None = None):
         del stage
