@@ -110,6 +110,7 @@ def plot_loss_curves(
 
     ax.set_xlabel("steps")
     ax.set_ylabel("loss")
+    # ax.set_yscale("log")
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
     if len(available_series) > 1:
