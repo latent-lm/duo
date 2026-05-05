@@ -10,9 +10,9 @@ Bridge SDE on the local chart (d=2, underlying drift f₀=0, σ=1):
 Forward Euler–Maruyama:
     x_{n+1} = x_n  +  f(x_n, y) Δt  +  g(x_n) √Δt · εₙ,    εₙ ~ N(0, I)
 
-NOTE — The one-step *posterior* in the ELBO derivation uses −f Δt
-(reverse-τ direction), but for *simulating* bridge states from q(·|y)
-we step forward with +f Δt since f is the h-transform (forward) drift.
+NOTE — The one-step *posterior* in the ELBO derivation uses +f Δt
+under the reverse-τ convention. This script uses the same local Euler
+step while iterating the sampled bridge path from the origin toward y.
 
 Along the radial direction toward y the drift simplifies to
     dr/dt = (1-r²)/2      ⟹     r(t) = tanh(t/2).
