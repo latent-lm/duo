@@ -37,23 +37,23 @@ class SmallMLP(nn.Module):
         return self.net(torch.cat([z, t], dim=-1))
 
 class MLPLM(nn.Module):
-    def __init__(self, vocab_size: int, io_dim: int, hidden_size: int, depth: int):
+    def __init__(self, vocab_size: int, input_dim: int, output_dim: int, hidden_size: int, depth: int):
         super().__init__()
         self.mlp = SmallMLP(
-            input_dim=io_dim + 1,
+            input_dim=input_dim + 1,
             hidden_size=hidden_size,
             depth=depth,
-            output_dim=io_dim,
+            output_dim=output_dim,
         )
 
-        self.lm_head = nn.Linear(io_dim, vocab_size, bias=False)
+        self.lm_head = nn.Linear(output_dim, vocab_size, bias=False)
 
     def forward(self, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """
         Predict vocabulary logits from a time-conditioned state.
 
         Args:
-            z (`torch.Tensor` of shape `(batch_size, io_dim)`):
+            z (`torch.Tensor` of shape `(batch_size, input_dim)`):
                 Input state.
             t (`torch.Tensor` of shape `(batch_size,)` or `(batch_size, 1)`):
                 Per-example time values.

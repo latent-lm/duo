@@ -20,6 +20,13 @@ except ModuleNotFoundError:
 def isnan_or_inf(x):
     return torch.logical_or(torch.isnan(x), torch.isinf(x))
 
+@dataclass
+class LossGeometry:
+    POINCARE_POLAR: str = "poincare_polar"
+    POINCARE_CARTESIAN: str = "poincare_cartesian":
+    LORENTZ_POLAR: str = "lorentz_polar"
+    LORENTZ_CARTESIAN: str = "lorentz_cartesian"
+
 class HyperBridge:
     PROPOSAL_EXP_NAME: str = "exp"
     PROPOSAL_TRUNCATED_EXP_NAME: str = "truncated_exp"
@@ -63,12 +70,28 @@ class HyperBridge:
         # print(f"thetas: {isnan_or_inf(thetas).any()}")
         return (ps,thetas)
 
+    @staticmethod
+    @torch.no_grad()
+    def polar_to_lorentz(rhos, thetas):
+        sinh_r = torch.sinh(rhos)
+        return torch.stack(
+            [torch.cosh(rhos), sinh_r * thetas.cos(), sinh_r * thetas.sin()],
+            dim=-1,
+        )
+
+    @staticmethod
+    @torch.no_grad()
+    def binary_bridge_lorentz(ts):
+        rhos, thetas = HyperBridge.binary_bridge(ts)
+        return HyperBridge.polar_to_lorentz(rhos, thetas)
+
+    # ---- Polar bridge loss ----------------------------------------------
     # logits        (N,V)     float64 (converts)
     # targets       (N,)      int64
     # rhos          (N,)      float64
     # thetas        (N,)      float64
     @staticmethod
-    def binary_bridge_loss_polar(logits, targets, rhos, thetas):
+    def binary_bridge_loss_poincare_disk_polar(logits, targets, rhos, thetas):
         (N,) = targets.shape
         (N,V) = logits.shape
         device = rhos.device
@@ -104,22 +127,6 @@ class HyperBridge:
         # print(f"sin_errors: {isnan_or_inf(sin_errors).any()}")
         return (cos_errors.square() + sin_errors.square())/2
 
-    # Replaces one-hot of sampled y with softmax(horo + log_ps) (the true
-    # posterior q(v | x_t)). At Bayes-optimal logits the per-sample loss is 0,
-    # since model posterior == true posterior.
-    @staticmethod
-    def binary_bridge_loss_polar_weighted(logits, log_ps, rhos, thetas):
-        (N, V) = logits.shape
-        device = rhos.device
-        phis = (torch.arange(V, device=device, dtype=torch.float64) + 0.5) * (2 * torch.pi / V)
-        alphas = thetas[:, None] - phis[None, :]
-        cos_a, sin_a = alphas.cos(), alphas.sin()
-        log_two = torch.log(torch.tensor(2.0, device=device, dtype=torch.float64))
-        horo = log_two - torch.logaddexp((1 - cos_a).log() + rhos[:, None],
-                                         (1 + cos_a).log() - rhos[:, None])
-        betas = torch.atan2(sin_a, rhos.cosh()[:, None] * cos_a - rhos.sinh()[:, None])
-        return HyperBridge._bridge_loss_finalize(horo, betas.cos(), betas.sin(), logits, log_ps)
-
     # ---- Cartesian bridge loss ----------------------------------------------
     # Implements the formula directly, term-by-term:
     #   L(theta; y) = (d-1)^2 / 2 * (1 - ||z_t||^2)^2
@@ -132,7 +139,7 @@ class HyperBridge:
     # posterior softmax((d-1) h + log_ps).
 
     @staticmethod
-    def _cartesian_geometry(rhos, thetas, V):
+    def _poincare_disk_cartesian_geometry(rhos, thetas, V):
         """Returns (z, v, diff, sq, one_minus_zz, h) used by every variant."""
         z = polar_to_cart(rhos, thetas)                                  # (N, 2)
         v = vocab_points(V, rhos.device, rhos.dtype)                     # (V, 2)
@@ -143,21 +150,21 @@ class HyperBridge:
         return z, v, diff, sq, one_minus_zz, h
 
     @staticmethod
-    def _expected_radial(mu, diff, sq):
+    def _poincare_disk_expected_radial(mu, diff, sq):
         """E_{v ~ mu}[ (v - z) / ||v - z||^2 ]  =  sum_v mu_v (v-z)/||v-z||^2."""
         return (mu / sq).unsqueeze(-1).mul(diff).sum(-2)                 # (N, 2)
 
     @staticmethod
-    def _cartesian_squared_residual(target, model, one_minus_zz, d=2):
+    def _poincare_disk_cartesian_squared_residual(target, model, one_minus_zz, d=2):
         """L = (d-1)^2 / 2 * (1 - ||z||^2)^2 * ||target - model||^2."""
         residual = target - model                                        # (N, 2)
         return (d - 1) ** 2 / 2 * one_minus_zz.squeeze(-1).square() \
                * residual.square().sum(-1)
 
     @staticmethod
-    def binary_bridge_loss_cartesian(logits, targets, rhos, thetas):
+    def binary_bridge_loss_poincare_disk_cartesian(logits, targets, rhos, thetas):
         V, d = logits.shape[-1], 2
-        z, v, diff, sq, one_minus_zz, h = HyperBridge._cartesian_geometry(rhos, thetas, V)
+        z, v, diff, sq, one_minus_zz, h = HyperBridge._poincare_disk_cartesian_geometry(rhos, thetas, V)
 
         # target term: (y - z) / ||y - z||^2
         y_minus_z = v[targets] - z                                       # (N, 2)
@@ -165,47 +172,67 @@ class HyperBridge:
 
         # model term: E_{v ~ mu^theta(.|z)}[ (v - z) / ||v - z||^2 ]
         mu = ((d - 1) * h + logits.to(torch.float64)).softmax(-1)        # (N, V)
-        model = HyperBridge._expected_radial(mu, diff, sq)               # (N, 2)
+        model = HyperBridge._poincare_disk_expected_radial(mu, diff, sq)               # (N, 2)
 
-        return HyperBridge._cartesian_squared_residual(target, model, one_minus_zz, d=d)
+        return HyperBridge._poincare_disk_cartesian_squared_residual(target, model, one_minus_zz, d=d)
 
     @staticmethod
-    def binary_bridge_loss_cartesian_weighted(logits, log_ps, rhos, thetas):
+    def _lorentz_boundary_points(V, device, dtype):
+        phis = (torch.arange(V, device=device, dtype=dtype) + 0.5) * (2 * torch.pi / V)
+        return torch.stack([torch.ones_like(phis), phis.cos(), phis.sin()], dim=-1)
+
+    @staticmethod
+    def _lorentz_inner(x, y):
+        return -x[..., 0] * y[..., 0] + (x[..., 1:] * y[..., 1:]).sum(-1)
+
+    @staticmethod
+    def _lorentz_geometry(rhos, thetas, V):
+        z = HyperBridge.polar_to_lorentz(rhos, thetas)                   # (N, 3)
+        xi = HyperBridge._lorentz_boundary_points(V, rhos.device, rhos.dtype)
+        inner = HyperBridge._lorentz_inner(z[:, None, :], xi[None, :, :]) # (N, V), negative
+        log_poisson = -(-inner).clamp_min(1e-300).log()                  # log 1 / (-<z,xi>)
+        directions = xi[None, :, :] / inner[:, :, None]                  # xi / <z,xi>
+        return directions, log_poisson
+
+    @staticmethod
+    def _lorentz_norm_sq(x):
+        return HyperBridge._lorentz_inner(x, x).clamp_min(0)
+
+    @staticmethod
+    def binary_bridge_loss_lorentz(logits, targets, rhos, thetas):
         V, d = logits.shape[-1], 2
-        _, _, diff, sq, one_minus_zz, h = HyperBridge._cartesian_geometry(rhos, thetas, V)
-        log_ps = log_ps.to(device=rhos.device, dtype=torch.float64)
-        prior  = (d - 1) * h
-
-        # target term: E_{v ~ mu^*(.|z)}[ (v - z) / ||v - z||^2 ]   (true posterior)
-        mu_true = (prior + log_ps).softmax(-1)                           # (N, V)
-        target  = HyperBridge._expected_radial(mu_true, diff, sq)        # (N, 2)
-
-        # model term: E_{v ~ mu^theta(.|z)}[ (v - z) / ||v - z||^2 ]
-        mu_model = (prior + logits.to(torch.float64)).softmax(-1)        # (N, V)
-        model    = HyperBridge._expected_radial(mu_model, diff, sq)      # (N, 2)
-
-        return HyperBridge._cartesian_squared_residual(target, model, one_minus_zz, d=d)
-
-    # Common finalization for both _weighted variants: subtract the true
-    # posterior softmax(horo + log_ps) from the model posterior, then project
-    # onto the bridge tangent basis (cos β, sin β).
-    @staticmethod
-    def _bridge_loss_finalize(horo, cos_b, sin_b, logits, log_ps):
-        log_ps = log_ps.to(device=horo.device, dtype=torch.float64)
-        c = (horo + logits.to(torch.float64)).softmax(-1) \
-          - (horo + log_ps).softmax(-1)
-        return ((cos_b * c).sum(-1).square() + (sin_b * c).sum(-1).square()) / 2
+        directions, log_poisson = HyperBridge._lorentz_geometry(rhos, thetas, V)
+        mu = ((d - 1) * log_poisson + logits.to(torch.float64)).softmax(-1)
+        target = directions[torch.arange(targets.numel(), device=targets.device), targets]
+        model = (mu[:, :, None] * directions).sum(-2)
+        residual = target - model
+        return (d - 1) ** 2 / 2 * HyperBridge._lorentz_norm_sq(residual)
 
     @staticmethod
-    def binary_nelbo_loss(logits, targets, rhos, thetas, proposal_weight):
-        bridge = HyperBridge.binary_bridge_loss_polar(
-        # bridge = HyperBridge.binary_bridge_loss_cartesian(
-        # bridge = HyperBridge.binary_bridge_loss_cartesian_weighted(
-            logits=logits,
-            targets=targets,
-            rhos=rhos,
-            thetas=thetas,
-        )
+    def binary_nelbo_loss(logits, targets, rhos, thetas, proposal_weight, loss_geometry="poincare_polar"):
+        if loss_geometry == LossGeometry.POINCARE_POLAR:
+            bridge = HyperBridge.binary_bridge_loss_poincare_disk_polar(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+            )
+        elif loss_geometry == LossGeometry.POINCARE_CARTESIAN:
+            bridge = HyperBridge.binary_bridge_loss_poincare_disk_cartesian(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+            )
+        elif loss_geometry == LossGeometry.LORENTZ_CARTESIAN:
+            bridge = HyperBridge.binary_bridge_loss_lorentz(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+            )
+        else:
+            raise ValueError(f"Unknown loss_geometry={loss_geometry!r}")
         return bridge * proposal_weight.to(dtype=bridge.dtype)
 
     @staticmethod
@@ -300,12 +327,16 @@ class HyperbolicDLM(L.LightningModule):
         self._val_epoch_weight = 0
         self._test_epoch_loss_total = 0.0
         self._test_epoch_weight = 0
-        if int(config.hyper_dim) != 2:
-            raise ValueError("unigram_test2.py expects hyper_dim=2 for polar coordinates.")
+
+        self.loss_geometry = str(config.get("loss_geometry", "poincare_polar"))
+        model_input_dim: int = self.config.hyper_dim
+        if "lorentz" in self.loss_geometry:
+            model_input_dim = self.config.hyper_dim + 1
 
         self.model = MLPLM(
             vocab_size=config.vocab_size,
-            io_dim=config.hyper_dim,
+            input_dim=model_input_dim,
+            output_dim=config.hyper_dim,
             hidden_size=config.hidden_size,
             depth=config.depth,
         )
@@ -332,8 +363,10 @@ class HyperbolicDLM(L.LightningModule):
         )
 
         rhos, thetas = self.bridge.binary_bridge(ts=ts)
-        # Feed the bridge perturbations directly in polar coordinates.
-        z = torch.stack([rhos, thetas], dim=-1).to(dtype=torch.float32)
+        if "lorentz" in self.loss_geometry:
+            z = self.bridge.polar_to_lorentz(rhos, thetas).to(dtype=torch.float32)
+        else:
+            z = torch.stack([rhos, thetas], dim=-1).to(dtype=torch.float32)
         logits = self.model(z=z, t=ts.to(dtype=torch.float32))
         nelbo = self.bridge.binary_nelbo_loss(
             logits=logits,
@@ -341,6 +374,7 @@ class HyperbolicDLM(L.LightningModule):
             rhos=rhos,
             thetas=thetas,
             proposal_weight=proposal_weight,
+            loss_geometry=self.loss_geometry,
         )
         ce = torch.nn.functional.cross_entropy(logits, targets, reduction="none")
         return {
@@ -432,10 +466,42 @@ def save_results(res, folder, file_name: str = "test_metrics.json"):
         json.dump(metrics, f, indent=2)
     return output_path
 
+def name_ext(config):
+    ext: str = ""
+    mode = config.get("mode", None)
+    loss_geometry = config.get("loss_geometry", None)
+    postfix = config.get("postfix", None)
+
+    if mode is not None:
+        ext += "_m-"
+        if mode == "opt":
+            ext += mode
+        elif mode == "tnb":
+            ext += mode
+        else:
+            raise ValueError(f"config.mode, {mode}, is not supported.")
+    if loss_geometry is not None:
+        ext += "_lg-"
+        if loss_geometry == LossGeometry.POINCARE_POLAR:
+            ext += "pp"
+        elif loss_geometry == LossGeometry.POINCARE_CARTESIAN:
+            ext += "pc"
+        elif loss_geometry == LossGeometry.LORENTZ_POLAR:
+            ext += "lp"
+        elif loss_geometry == LossGeometry.LORENTZ_CARTESIAN:
+            ext += "lc"
+        else:
+            raise ValueError(f"config.mode, {mode}, is not supported.")
+    if postfix is not None:
+        ext += f"_{postfix}"
+
+    return ext
+
 @hydra.main(version_base=None)
 def main(cfg: DictConfig) -> None:
     defaults = OmegaConf.create(
         {
+            "mode": "opt",
             "vocab_size": 10,
             "hyper_dim": 2,
             "hidden_size": 128,
@@ -448,12 +514,13 @@ def main(cfg: DictConfig) -> None:
             "max_steps": 2_000,
             "proposal_type": "exp",
             "proposal_exp_rate": 1.0,
+            "loss_geometry": "poincare_polar",
             "lr": 1e-5,
             "ps": [0.91, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01],
             # "ps": [0.1] * 10,
             "seed": 42,
             "num_workers": 0,
-            "folder": "unigram_test2_losses_sp${max_steps}_lr${lr}_pt${proposal_type}_per${proposal_exp_rate}_vs${vocab_size}",
+            "folder": "unigram_test2_losses_sp${max_steps}_lr${lr}_pt${proposal_type}_per${proposal_exp_rate}_vs${vocab_size}${name_ext()}",
             # "folder": "unigram_test2_losses_sp${max_steps}_lr${lr}_pt${proposal_type}_per${proposal_exp_rate}",
             "loss_plot_path": "plot.jpg",
             "loss_data_path": "data.json",
