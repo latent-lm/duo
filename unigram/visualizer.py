@@ -133,7 +133,7 @@ class DataMgr:
         self,
         recorder: Recorder,
         data_file="loss_history.json",
-        fig_file="loss_curves.png",
+        fig_file="loss_curves.jpg",
         **plot_kwargs,
     ):
         data_path = recorder.save(self.path(data_file))

@@ -1,5 +1,9 @@
+import os
 import json
 from pathlib import Path
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any, Dict, Optional
 
 from omegaconf import DictConfig, OmegaConf
 import hydra
@@ -9,7 +13,7 @@ import torch.nn as nn
 import lightning as L
 
 try:
-    from unigram.model import MLPLM, polar_to_cart, vocab_points
+    from unigram.model import MLPLM, OptimalModel, polar_to_cart, vocab_points
     from unigram.dataset import UnigramDataModule, process_ps
     from unigram.visualizer import DataMgr, Recorder
 except ModuleNotFoundError:
@@ -23,7 +27,7 @@ def isnan_or_inf(x):
 @dataclass
 class LossGeometry:
     POINCARE_POLAR: str = "poincare_polar"
-    POINCARE_CARTESIAN: str = "poincare_cartesian":
+    POINCARE_CARTESIAN: str = "poincare_cartesian"
     LORENTZ_POLAR: str = "lorentz_polar"
     LORENTZ_CARTESIAN: str = "lorentz_cartesian"
 
@@ -186,12 +190,12 @@ class HyperBridge:
         return -x[..., 0] * y[..., 0] + (x[..., 1:] * y[..., 1:]).sum(-1)
 
     @staticmethod
-    def _lorentz_geometry(rhos, thetas, V):
+    def _lorentz_geometry(rhos, thetas, V, d):
         z = HyperBridge.polar_to_lorentz(rhos, thetas)                   # (N, 3)
         xi = HyperBridge._lorentz_boundary_points(V, rhos.device, rhos.dtype)
         inner = HyperBridge._lorentz_inner(z[:, None, :], xi[None, :, :]) # (N, V), negative
-        log_poisson = -(-inner).clamp_min(1e-300).log()                  # log 1 / (-<z,xi>)
-        directions = xi[None, :, :] / inner[:, :, None]                  # xi / <z,xi>
+        log_poisson = (d - 1) *  (-(-inner).clamp_min(1e-300).log())     # (d - 1) * log 1 / (-<z,xi(y)>)
+        directions = xi[None, :, :] / inner[:, :, None]                  # xi(y) / <z,xi(y)>
         return directions, log_poisson
 
     @staticmethod
@@ -201,8 +205,9 @@ class HyperBridge:
     @staticmethod
     def binary_bridge_loss_lorentz(logits, targets, rhos, thetas):
         V, d = logits.shape[-1], 2
-        directions, log_poisson = HyperBridge._lorentz_geometry(rhos, thetas, V)
-        mu = ((d - 1) * log_poisson + logits.to(torch.float64)).softmax(-1)
+        directions, log_poisson = HyperBridge._lorentz_geometry(rhos, thetas, V, d)
+        # \mu^{\theta}(z_t) = softmax ( f_{\theta}(z_t) + (d-1) \sum_{v \in V} e_v \log \frac{- \langle z, x \rangle_{L}}{- \langle O, x \rangle_{L}} )
+        mu = (log_poisson + logits.to(torch.float64)).softmax(-1) 
         target = directions[torch.arange(targets.numel(), device=targets.device), targets]
         model = (mu[:, :, None] * directions).sum(-2)
         residual = target - model
@@ -211,6 +216,7 @@ class HyperBridge:
     @staticmethod
     def binary_nelbo_loss(logits, targets, rhos, thetas, proposal_weight, loss_geometry="poincare_polar"):
         if loss_geometry == LossGeometry.POINCARE_POLAR:
+            # print("Use POINCARE_POLAR")
             bridge = HyperBridge.binary_bridge_loss_poincare_disk_polar(
                 logits=logits,
                 targets=targets,
@@ -218,6 +224,7 @@ class HyperBridge:
                 thetas=thetas,
             )
         elif loss_geometry == LossGeometry.POINCARE_CARTESIAN:
+            # print("Use POINCARE_CARTESIAN")
             bridge = HyperBridge.binary_bridge_loss_poincare_disk_cartesian(
                 logits=logits,
                 targets=targets,
@@ -225,6 +232,7 @@ class HyperBridge:
                 thetas=thetas,
             )
         elif loss_geometry == LossGeometry.LORENTZ_CARTESIAN:
+            # print("Use LORENTZ_CARTESIAN")
             bridge = HyperBridge.binary_bridge_loss_lorentz(
                 logits=logits,
                 targets=targets,
@@ -324,26 +332,38 @@ class HyperbolicDLM(L.LightningModule):
         self.recorder = Recorder()
         self._test_step_offset = 0
         self._val_epoch_loss_total = 0.0
+        self._val_epoch_loss_total_var = 0.0
         self._val_epoch_weight = 0
         self._test_epoch_loss_total = 0.0
+        self._test_epoch_loss_total_var = 0.0
         self._test_epoch_weight = 0
 
-        self.loss_geometry = str(config.get("loss_geometry", "poincare_polar"))
-        model_input_dim: int = self.config.hyper_dim
+        self.hyper_dim: int = config.get("hyper_dim", None)
+        if self.hyper_dim is None:
+            raise ValueError(f"config.hyper_dim, {self.hyper_dim}, shouldn't be None")
+        self.loss_geometry = config.get("loss_geometry", None)
+        if self.loss_geometry is None:
+            raise ValueError(f"config.loss_geometry, {self.loss_geometry}, shouldn't be None")
+        self.model_input_dim: int = self.hyper_dim
+        self.mode = config.get("mode", None)
+        
         if "lorentz" in self.loss_geometry:
-            model_input_dim = self.config.hyper_dim + 1
+            self.model_input_dim = self.hyper_dim + 1
 
-        self.model = MLPLM(
-            vocab_size=config.vocab_size,
-            input_dim=model_input_dim,
-            output_dim=config.hyper_dim,
-            hidden_size=config.hidden_size,
-            depth=config.depth,
-        )
-
-        # self.model = OptimalModel(
-        #     ps=process_ps(config.ps),
-        # )
+        if self.mode == "tnb":
+            self.model = MLPLM(
+                vocab_size=config.vocab_size,
+                input_dim=self.model_input_dim,
+                output_dim=config.hyper_dim,
+                hidden_size=config.hidden_size,
+                depth=config.depth,
+            )
+        elif self.mode == "opt":
+            self.model = OptimalModel(
+                ps=process_ps(config.ps),
+            )
+        else:
+            raise ValueError(f"mode shouldn't be {self.mode}, only support tnb and opt.")
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=float(self.config.lr))
@@ -391,8 +411,11 @@ class HyperbolicDLM(L.LightningModule):
         del batch_idx
         losses = self._compute_losses(batch)
         loss = losses["loss"].mean()
+        loss_var = losses["loss"].var()
         self.recorder.add("train_loss", step=int(self.global_step) + 1, val=loss)
+        self.recorder.add("train_loss_var", step=int(self.global_step) + 1, val=loss_var)
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train_loss_var", loss_var, on_step=True, on_epoch=True, prog_bar=True)
         self.log(
             "train_nelbo_loss",
             losses["nelbo_loss"].mean(),
@@ -407,24 +430,31 @@ class HyperbolicDLM(L.LightningModule):
         del batch_idx
         losses = self._compute_losses(batch)
         loss = losses["loss"].mean()
+        loss_var = losses["loss"].var()
+
         batch_size = int(batch.reshape(-1).shape[0])
         if not self.trainer.sanity_checking:
             self._val_epoch_loss_total += float(loss.detach().cpu()) * batch_size
+            self._val_epoch_loss_total_var += float(loss_var.detach().cpu()) * batch_size
             self._val_epoch_weight += batch_size
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
+        self.log("val_loss_var", loss_var, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
         self.log("val_nelbo_loss", losses["nelbo_loss"].mean(), on_step=False, on_epoch=True, batch_size=batch_size)
         self.log("val_ce", losses["ce"].mean(), on_step=False, on_epoch=True, batch_size=batch_size)
         return loss
 
     def on_validation_epoch_start(self):
         self._val_epoch_loss_total = 0.0
+        self._val_epoch_loss_total_var = 0.0
         self._val_epoch_weight = 0
 
     def on_validation_epoch_end(self):
         if self.trainer.sanity_checking or self._val_epoch_weight == 0:
             return
         mean_val_loss = self._val_epoch_loss_total / self._val_epoch_weight
+        var_val_loss = self._val_epoch_loss_total_var / self._val_epoch_weight
         self.recorder.add("val_loss", step=int(self.global_step), val=mean_val_loss)
+        self.recorder.add("val_loss_var", step=int(self.global_step), val=var_val_loss)
 
     def on_test_start(self):
         self._test_step_offset = max(
@@ -432,16 +462,21 @@ class HyperbolicDLM(L.LightningModule):
             int(self.global_step),
         )
         self._test_epoch_loss_total = 0.0
+        self._test_epoch_loss_total_var = 0.0
         self._test_epoch_weight = 0
 
     def test_step(self, batch: torch.Tensor, batch_idx: int):
         del batch_idx
         losses = self._compute_losses(batch)
         loss = losses["loss"].mean()
+        loss_var = losses["loss"].var()
+
         batch_size = int(batch.reshape(-1).shape[0])
         self._test_epoch_loss_total += float(loss.detach().cpu()) * batch_size
+        self._test_epoch_loss_total_var += float(loss_var.detach().cpu()) * batch_size
         self._test_epoch_weight += batch_size
         self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
+        self.log("test_loss_var", loss_var, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
         self.log("test_nelbo_loss", losses["nelbo_loss"].mean(), on_step=False, on_epoch=True, batch_size=batch_size)
         self.log("test_ce", losses["ce"].mean(), on_step=False, on_epoch=True, batch_size=batch_size)
         return loss
@@ -450,10 +485,16 @@ class HyperbolicDLM(L.LightningModule):
         if self._test_epoch_weight == 0:
             return
         mean_test_loss = self._test_epoch_loss_total / self._test_epoch_weight
+        var_test_loss = self._test_epoch_loss_total_var / self._test_epoch_weight
         self.recorder.add(
             "test_loss",
             step=self._test_step_offset + 1,
             val=mean_test_loss,
+        )
+        self.recorder.add(
+            "test_loss_var",
+            step=self._test_step_offset + 1,
+            val=var_test_loss,
         )
 
 def save_results(res, folder, file_name: str = "test_metrics.json"):
@@ -491,11 +532,84 @@ def name_ext(config):
         elif loss_geometry == LossGeometry.LORENTZ_CARTESIAN:
             ext += "lc"
         else:
-            raise ValueError(f"config.mode, {mode}, is not supported.")
+            raise ValueError(f"config.loss_geometry, {loss_geometry}, is not supported.")
     if postfix is not None:
         ext += f"_{postfix}"
 
     return ext
+
+class TaskMgr:
+    FINISHED_FILE: str = "finished.json"
+
+    def __init__(self, work_dir: Optional[str | Path] = None):
+        """
+        If work_dir is None, use the current working directory.
+
+        With Hydra:
+            hydra.job.chdir=true
+
+        Path.cwd() should be the current Hydra job directory.
+        """
+        self.work_dir = Path(work_dir) if work_dir is not None else Path("")
+        self.finished_path = Path(os.path.join(self.work_dir, self.FINISHED_FILE))
+
+    def finished(self, metadata: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Mark this task as finished.
+
+        Only call this after the experiment successfully completes.
+        """
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+
+        payload = {
+            "finished": True,
+            "finished_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+        if metadata is not None:
+            payload["metadata"] = metadata
+
+        with open(self.finished_path, mode="w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    def check_finished(self) -> bool:
+        """
+        Return True if this task has already finished.
+        """
+        if not self.finished_path.exists():
+            return False
+
+        try:
+            with open(self.finished_path, mode="r", encoding="utf-8") as f:
+                payload = json.load(f)
+
+            return bool(payload.get("finished", False))
+
+        except Exception:
+            print(f"The task has been finished at {self.finished_path}.")
+            # If the finished file is corrupted, do not skip the task.
+            return False
+
+    def remove_finished(self) -> None:
+        """
+        Remove the finished marker, useful if you want to rerun a task.
+        """
+        if self.finished_path.exists():
+            self.finished_path.unlink()
+
+def folder(config):
+    return (
+        f"unigram_test2_losses"
+        f"_sp{config.max_steps}"
+        f"_lr{config.lr}"
+        f"_pt{config.proposal_type}"
+        f"_per{config.proposal_exp_rate}"
+        f"_vs{config.vocab_size}"
+        f"{name_ext(config)}"
+    )
+
+OmegaConf.register_new_resolver("name_ext", lambda *, _root_: name_ext(_root_), replace=True)
+OmegaConf.register_new_resolver("folder", lambda *, _root_: folder(_root_), replace=True)
 
 @hydra.main(version_base=None)
 def main(cfg: DictConfig) -> None:
@@ -509,7 +623,7 @@ def main(cfg: DictConfig) -> None:
             "depth": 3,
             "hyper_T": 1e7,
             "hyper_dt": 0.01,
-            "val_size": 4_000,
+            "val_size": 4_00000,
             "batch_size": 256,
             "max_steps": 2_000,
             "proposal_type": "exp",
@@ -520,7 +634,7 @@ def main(cfg: DictConfig) -> None:
             # "ps": [0.1] * 10,
             "seed": 42,
             "num_workers": 0,
-            "folder": "unigram_test2_losses_sp${max_steps}_lr${lr}_pt${proposal_type}_per${proposal_exp_rate}_vs${vocab_size}${name_ext()}",
+            "folder": "${folder:}",
             # "folder": "unigram_test2_losses_sp${max_steps}_lr${lr}_pt${proposal_type}_per${proposal_exp_rate}",
             "loss_plot_path": "plot.jpg",
             "loss_data_path": "data.json",
@@ -529,6 +643,10 @@ def main(cfg: DictConfig) -> None:
     )
     cfg = OmegaConf.merge(defaults, cfg)
     print(OmegaConf.to_yaml(cfg))
+
+    task_mgr = TaskMgr(work_dir=cfg.folder)
+    if task_mgr.check_finished():
+        return
 
     L.seed_everything(int(cfg.seed), workers=True)
     datamodule = UnigramDataModule(config=cfg)
@@ -544,8 +662,8 @@ def main(cfg: DictConfig) -> None:
         log_every_n_steps=1,
         num_sanity_val_steps=0,
     )
-
-    trainer.fit(model, datamodule=datamodule)
+    if cfg.mode == "tnb":
+        trainer.fit(model, datamodule=datamodule)
     test_metrics = trainer.test(model, datamodule=datamodule, verbose=False)
     data_mgr = DataMgr(cfg.folder)
     saved = data_mgr.save(
@@ -563,6 +681,8 @@ def main(cfg: DictConfig) -> None:
 
     metrics_path = save_results(test_metrics, cfg.folder)
     print(f"Saved test metrics to: {metrics_path}")
+
+    task_mgr.finished()
 
 
 if __name__ == "__main__":
