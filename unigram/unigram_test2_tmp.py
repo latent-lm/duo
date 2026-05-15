@@ -289,7 +289,7 @@ class HyperBridge:
                 min=1e-12,
                 max=1 - 1e-12,
             )
-            # Use torch.log(u) is also correct, but torch.log1p(-u) is more numerically stable because it can handle u close to 0
+            # Use torch.log(-u) is also correct, but torch.log1p(-u) is more numerically stable because it can handle u close to 0
             ts = - torch.log1p(-u) / exp_rate
             density = exp_rate * torch.exp(-exp_rate * ts)
             return ts, density.reciprocal()
@@ -304,9 +304,9 @@ class HyperBridge:
                 + torch.rand(numel, device=device, dtype=dtype)
             ) / numel
             u = u.view(-1)[torch.randperm(u.numel())].view(u.shape)
-            u = u.clamp(min=1e-12, max=1 - 1e-5).reshape(shape)
+            u = u.clamp(min=1e-12, max=1 - 1e-12).reshape(shape)
             # Use torch.log(u) is also correct, but torch.log1p(-u) is more numerically stable because it can handle u close to 0
-            ts = - torch.log1p(-u) / exp_rate
+            ts = - torch.log(u) / exp_rate
             density = exp_rate * torch.exp(-exp_rate * ts)
             return ts, density.reciprocal()
         else:
