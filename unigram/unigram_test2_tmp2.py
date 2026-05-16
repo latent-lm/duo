@@ -60,19 +60,12 @@ class HyperBridge:
     @staticmethod
     @torch.no_grad()
     def binary_bridge(ts):
-        # print(f"ts: {ts.shape}")
         ns = torch.poisson(ts/8).to(torch.int64)
-        # print(f"ns: {ns.shape}")
         ss = ts.sqrt() * HyperBridge.sample_chi(2*ns+3, ts.dtype)
-        # print(f"ss: {ss.shape}")
-        # print(f"ss: {isnan_or_inf(ss).any()}")
         vs = torch.rand_like(ts)
-        # print(f"vs: {isnan_or_inf(vs).any()}")
         ps = torch.acosh(vs.square() + (1-vs.square())*torch.cosh(ss))
         us = torch.rand_like(ts)
         thetas = 2 * torch.atan((-ps).exp() * torch.tan(torch.pi * (us - 0.5)))
-        # print(f"ps: {isnan_or_inf(ps).any()}")
-        # print(f"thetas: {isnan_or_inf(thetas).any()}")
         return (ps,thetas)
 
     @staticmethod
@@ -111,25 +104,17 @@ class HyperBridge:
         ) * (2 * torch.pi / V)
         # first, we get the horosphere distances
         alphas = thetas[:,None] - phis[None,:]  # angular offsets between z and v
-        # print(f"alphas: {isnan_or_inf(alphas).any()}")
         cos_alphas = alphas.cos()
-        # print(f"cos_alphas: {isnan_or_inf(cos_alphas).any()}")
         sin_alphas = alphas.sin()
-        # print(f"sin_alphas: {isnan_or_inf(sin_alphas).any()}")
         log_two = torch.log(torch.tensor(2.0, device=device, dtype=torch.float64))
-        # print(f"log_two: {isnan_or_inf(log_two).any()}")
         horosphere_dists = log_two - torch.logaddexp((1 - cos_alphas).log() + rhos[:,None], (1 + cos_alphas).log() - rhos[:,None])
-        # print(f"horosphere_dists: {isnan_or_inf(horosphere_dists).any()}")
         # remake mu and subtract the target
         mu = (horosphere_dists + logits.to(torch.float64)).softmax(-1)
         mu = mu - torch.nn.functional.one_hot(targets,V).to(torch.float64)
-        # print(f"mu: {isnan_or_inf(mu).any()}")
         # next, we transform the angles alpha after motion by rho
         betas = torch.atan2(sin_alphas, rhos.cosh()[:,None] * cos_alphas - rhos.sinh()[:,None])
         cos_errors = (betas.cos() * mu).sum(-1)
         sin_errors = (betas.sin() * mu).sum(-1)
-        # print(f"cos_errors: {isnan_or_inf(cos_errors).any()}")
-        # print(f"sin_errors: {isnan_or_inf(sin_errors).any()}")
         return (cos_errors.square() + sin_errors.square())/2
 
     # ---- Cartesian bridge loss ----------------------------------------------
@@ -305,11 +290,13 @@ class HyperBridge:
             ) / numel
             u = u.view(-1)[torch.randperm(u.numel(), device=device)].view(u.shape)
             u = u.clamp(min=1e-12, max=1 - 1e-12).reshape(shape)
-            # Use torch.log(u) is also correct, but torch.log1p(-u) is more numerically stable because it can handle u close to 0
+            # The same ts sampling as: ts = - torch.log(u) / exp_rate
             # ts = - torch.log1p(-u) / exp_rate
             ts = - torch.log(u) / exp_rate
-            density = exp_rate * torch.exp(-exp_rate * ts)
-            return ts, density.reciprocal()
+            # The same equation as: weights = (exp_rate * ts).exp() / exp_rate
+            weights = 1.0 / (exp_rate * u)
+            # weights = (exp_rate * ts).exp() / exp_rate
+            return ts, weights
         else:
             raise NotImplementedError(f"proposal_type={proposal_type} is not implemented.")
 
@@ -409,6 +396,9 @@ class HyperbolicDLM(L.LightningModule):
         )
 
         rhos, thetas = self.bridge.binary_bridge(ts=ts)
+        thetas = thetas + (
+            targets.to(dtype=torch.float64) + 0.5
+        ) * (2 * torch.pi / int(self.config.vocab_size))
         if "lorentz" in self.loss_geometry:
             z = self.bridge.polar_to_lorentz(rhos, thetas).to(dtype=torch.float32)
         else:
@@ -658,8 +648,8 @@ def main(cfg: DictConfig) -> None:
             "hyper_T": 1e7,
             "hyper_dt": 0.01,
             "val_size": 4_000,
-            "test_size": 4_00000,
-            "batch_size": 256,
+            "test_size": 4_000000,
+            "batch_size": 2048,
             "max_steps": 2_000,
             "proposal_type": "exp",
             "proposal_exp_rate": 1.0,

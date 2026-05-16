@@ -73,7 +73,7 @@ class UnigramDataModule(L.LightningDataModule):
             size=self.config.val_size, ps=self.config.ps, seed=self.config.seed + 1
         )
         self.test_dataset = UnigramDataset(
-            size=self.config.val_size, ps=self.config.ps, seed=self.config.seed + 2
+            size=self.config.test_size, ps=self.config.ps, seed=self.config.seed + 2
         )
 
     def train_dataloader(self):
@@ -88,7 +88,7 @@ class UnigramDataModule(L.LightningDataModule):
         return DataLoader(
             self.val_dataset,
             batch_size=self.config.batch_size,
-            shuffle=False,
+            shuffle=True,
             num_workers=self.config.num_workers,
         )
 
@@ -96,6 +96,6 @@ class UnigramDataModule(L.LightningDataModule):
         return DataLoader(
             self.test_dataset,
             batch_size=self.config.batch_size,
-            shuffle=False,
+            shuffle=True,
             num_workers=self.config.num_workers,
         )

@@ -264,7 +264,7 @@ $$
 \begin{aligned}
 \mathcal{L}(\theta; y)
 & =
--(d-1)
+\frac{(d-1)^2}{2}
 \mathbb{E}_{z_{t} \sim q_{t \mid \infty}(\cdot \mid y)}
 \left[
 	\int_0^\infty
@@ -273,19 +273,21 @@ $$
 	-
 	\mathbb{E}_{v \sim \mu^\theta(\cdot \mid z_t)} \left[
 	\frac{\xi(v)}{\langle z_t, \xi(v) \rangle_{L}} \right]
-	\right\|^2
+	\right\|_L^2
 	dt
 \right] \\
 \mu^{\theta}(z_t) 
 & = \operatorname{softmax} \big( f_{\theta}(z_t) + (d-1) \sum_{v \in V} e_v \log \frac{- \langle z, x \rangle_{L}}{- \langle O, x \rangle_{L}} \big)
 \end{aligned}
 $$
+where $\| x \|_{L} := \langle x, x \rangle_L$ is the Lorentz norm.
+
 If we further consider the importance sampling from a proposal distribution $t_i \sim \pi$, the loss can be represented as
 $$
 \begin{aligned}
 \mathcal{L}(\theta; y)
 & =
--(d-1)
+\frac{(d-1)^2}{2}
 \sum_{i=1}^{N} w(t_i)
 \mathbb{E}_{z_{t_i} \sim q_{t_i \mid \infty}(\cdot \mid y)}
 \left[
@@ -295,7 +297,7 @@ $$
 	-
 	\mathbb{E}_{v \sim \mu^\theta(\cdot \mid z_{t_i})} \left[
 	\frac{\xi(v)}{\langle z_{t_i}, \xi(v) \rangle_{L}} \right]
-	\right\|^2
+	\right\|_L^2
 	dt
 \right] \\
 \end{aligned}
@@ -319,13 +321,3 @@ Since $1-u \overset{d}{=} u$, you can equivalently use $t = -\ln(u)/\lambda$. Th
 $$
 t_1 = -\frac{\ln(1-u)}{\lambda}, \quad t_2 = -\frac{\ln(u)}{\lambda}
 $$
-
----
-#### Brownian Bridge on Poincare Disk with Local Chart Projection
-Given a target point $y$ at the boundary of the Poincare Disk $||y|| = 1$, the Brownian bridge with $t: \infty \to 0$ is described as
-$$dx_t = \left( f(x_t, t) + \sigma^2(x_t, t) \frac{d-1}{2} \frac{(1-\|x_t\|^2)^2}{\|y-x_t\|^2} (y-x_t) - \frac{\sigma^2(x_t, t) d}{4} (1-\|x_t\|^2) x_t \right) dt + \frac{\sigma(x_t, t) (1-\|x_t\|^2)}{2} d\bar{W}_t$$
-Therefore, $q(y | x_t)$ is
-$$
-q(y | x_t) = \frac{1}{A_{d-1}} \left( \frac{1 - \|x_t\|^2}{\|x_t - y\|^2} \right)^{d-1}
-$$
-where $A_{d-1} = \frac{2\pi^{d/2}}{\Gamma(d/2)}$ is the surface area of $(d-1)$-dimensional unit sphere
