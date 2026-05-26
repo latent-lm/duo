@@ -1,8 +1,33 @@
 import torch
 from typing import Tuple
 
+@dataclass
+class Geometry:
+    POINCARE: str = "poincare"
+    LORENTZ_POLAR: str = "lorentz_polar"
+    LORENTZ_CARTESIAN: str = "lorentz_cartesian"
+
+@dataclass
+class Coordinate:
+    POLAR: str = "polar"
+    CARTESIAN: str = "cartesian"
 
 class FreeBinaryHyperbolicHeatKernel:
+    """
+    
+    """
+    @staticmethod
+    @torch.no_grad()
+    def poincare_polar_to_lorentz_cartesian(
+        rhos: torch.FloatTensor,
+        thetas: torch.FloatTensor,
+    ) -> torch.FloatTensor:
+        sinh_r = torch.sinh(rhos)
+        return torch.stack(
+            [torch.cosh(rhos), sinh_r * thetas.cos(), sinh_r * thetas.sin()],
+            dim=-1,
+        )
+
     @staticmethod
     def sample_chi(ns, dtype=torch.float64):
         # chi(n) = sqrt(chi^2(n)), and chi^2(n) ~ Gamma(shape=n/2, scale=2).
@@ -25,25 +50,107 @@ class FreeBinaryHyperbolicHeatKernel:
 
     @staticmethod
     @torch.no_grad()
-    def binary_free_hyperbolic_heat_kernel(ts: torch.FloatTensor):
+    def binary_free_poincare_heat_kernel(
+        ts: torch.FloatTensor,
+        output_coord: Optional[str] = None,
+    ):
+        """
+        Args:
+            ts (`torch.FloatTensor` of shape `(batch_size,)`):
+                Heat times, strictly positive. The dtype of `ts` is preserved throughout.
+            output_coord (`str`, *optional*, defaults to `None`):
+                One of `"polar"` or `"cartesian"`.
+
+        Returns:
+            `Tuple[torch.FloatTensor, torch.FloatTensor]`: A pair `(rhos, thetas)`:
+                - `rhos` (`torch.FloatTensor` of shape `(batch_size,)`): hyperbolic distance
+                  from the origin, non-negative, same dtype/device as `ts`.
+                - For `d == 2`, `thetas` of shape `(batch_size,)`: wrapped-Cauchy angle in
+                  `(-pi, pi]`, bit-exact to the binary closed-form sampler.
+        """
         ns = torch.poisson(ts/8).to(torch.int64)
         ss = ts.sqrt() * FreeBinaryHyperbolicHeatKernel.sample_chi(2*ns+3, ts.dtype)
         vs = torch.rand_like(ts)
         ps = torch.acosh(vs.square() + (1-vs.square())*torch.cosh(ss))
         us = torch.rand_like(ts)
         thetas = 2 * torch.atan((-ps).exp() * torch.tan(torch.pi * (us - 0.5)))
-        return (ps, thetas)
+        if output_coord == Coordinate.CARTESIAN:
+            pass
+            # TODO: Finish this
+        else:
+            return ps, thetas
 
     @staticmethod
     @torch.no_grad()
-    def binary_hyperbolic_bridge(ts: torch.FloatTensor, targets: torch.LongTensor, V: int):
+    def binary_free_lorentz_heat_kernel(
+        ts: torch.FloatTensor,
+        output_coord: Optional[str] = None,
+    ):
+        rhos, thetas = FreeBinaryHyperbolicHeatKernel.binary_free_poincare_heat_kernel(ts=ts, output_coord=Coordinate.POLAR)
+        if output_coord == Coordinate.POLAR:
+            return rhos, thetas
+        else:
+            return FreeBinaryHyperbolicHeatKernel.poincare_polar_to_lorentz_cartesian(rhos=rhos, thetas=thetas)
+
+    @staticmethod
+    @torch.no_grad()
+    def binary_poincare_bridge(
+        ts: torch.FloatTensor,
+        targets: torch.LongTensor,
+        word_embedding: torch.FloatTensor,
+        output_coord: Optional[str] = None,
+    ):
         rhos, thetas = FreeBinaryHyperbolicHeatKernel.binary_free_hyperbolic_heat_kernel(ts=ts)
         # thetas = thetas + (targets.to(ts.dtype) + 0.5) * (2 * torch.pi / V)
         e = word_embedding[targets]                              # (B, 2), unit vectors
         target_angle = torch.atan2(e[..., 1], e[..., 0])         # (B,) in (-π, π]
         thetas = thetas + target_angle
-        return rhos, thetas
+        if output_coord == Coordinate.CARTESIAN:
+            pass
+            # TODO: Finish this
+        else:
+            return rhos, thetas
 
+    @staticmethod
+    @torch.no_grad()
+    def binary_lorentz_bridge(
+        ts: torch.FloatTensor,
+        targets: torch.LongTensor,
+        word_embedding: torch.FloatTensor,
+        output_coord: Optional[str] = None,
+    ):
+        # TODO: Finish this
+        if output_coord == Coordinate.POLAR:
+            pass
+            # TODO: Finish this
+        else:
+            # TODO: Finish this
+
+    @staticmethod
+    @torch.no_grad()
+    def geodesic(
+        t: torch.FloatTensor,
+        src: Optional[torch.FloatTensor] = None,
+        dest: Optional[torch.FloatTensor] = None,
+        src_radial: Optional[torch.FloatTensor] = None,
+        src_angular: Optional[torch.FloatTensor] = None,
+        dest_radial: Optional[torch.FloatTensor] = None,
+        dest_angular: Optional[torch.FloatTensor] = None,
+        output_coord: Optional[str] = None,
+    ):
+        if (src is not None and (src_radial is not None or src_angular is not None)) or (src is None and (src_radial is None or src_angular is None)):
+            raise ValueError(f"Only accept one source, either src or (src_radial, src_angular)")
+        if (dest is not None and (dest_radial is not None or dest_angular is not None)) or (dest is None and (dest_radial is None or dest_angular is None)):
+            raise ValueError(f"Only accept one destination, either src or (dest_radial, dest_angular)")
+        
+        # Decide the cooridnate of the output
+        if output_coord is None:
+            if src is not None:
+                output_coord = Coordinate.CARTESIAN
+            else:
+                output_coord = Coordinate.POLAR
+
+        # TODO: Implement the geodesic calculation in a numerical stable and efficient way and convert to correct coordinate
 
 class FreeHyperbolicHeatKernel:
     # Free hyperbolic heat kernel on H^d, starting from origin, in polar coordinates (rho, u).
@@ -59,8 +166,8 @@ class FreeHyperbolicHeatKernel:
     #
     # Three equivalent samplers (selected by `method`):
     #     "boost" -- Lorentz-boost a uniform S^{d-1} sample by rapidity rho along e_1
-    #     "icdf"  -- grid-based inverse-CDF on c = <e_1, u>, then uniform w perp e_1
-    #     "vmf"   -- Gamma-vMF mixture: lambda ~ Gamma(d-1, cosh rho), u ~ vMF(e_1, lambda sinh rho)
+    #     "icdf"  -- Mobius transform of a Beta-on-c sample (exact inverse-CDF)
+    #     "vmf"   -- Wood-style Beta envelope with x = tanh rho (acceptance = 1, exact)
     #
     # At d=2 every public entry point short-circuits to FreeBinaryHyperbolicHeatKernel for
     # bit-exact parity.
@@ -109,14 +216,41 @@ class FreeHyperbolicHeatKernel:
             raise ValueError(f"FreeHyperbolicHeatKernel requires d >= 2; got d={d}")
         if ts.numel() == 0:
             return torch.empty_like(ts)
-
         rate = ((d - 1) ** 2) * ts / 8.0
         ns = torch.poisson(rate).to(torch.int64)
         ss = ts.sqrt() * FreeBinaryHyperbolicHeatKernel.sample_chi(2 * ns + d + 1, ts.dtype)
         vs = torch.rand_like(ts)
-        arg = vs.square() + (1 - vs.square()) * torch.cosh(ss)
-        arg = arg.clamp_min(1.0)
-        return torch.acosh(arg)
+        return FreeHyperbolicHeatKernel._stable_acosh_gruet(vs, ss)
+
+    @staticmethod
+    @torch.no_grad()
+    def _stable_acosh_gruet(vs: torch.FloatTensor, ss: torch.FloatTensor) -> torch.FloatTensor:
+        r"""Numerically stable `arccosh(v^2 + (1 - v^2) * cosh(s))` for large `s`.
+
+        Uses the identity `arccosh(arg) = log(arg) + log1p(sqrt(1 - 1/arg^2))` evaluated in
+        log-space so the `cosh(s)` factor does not overflow when `s` is large.
+
+        Args:
+            vs (`torch.FloatTensor`): uniform draws in `[0, 1]`, same shape as `ss`.
+            ss (`torch.FloatTensor`): scaled chi draws, non-negative.
+
+        Returns:
+            `torch.FloatTensor`: `arccosh(v^2 + (1 - v^2) * cosh(s))`, same shape/dtype.
+        """
+        ln2 = float(torch.log(torch.tensor(2.0, dtype=ss.dtype)).item())
+        log_cosh_s = torch.where(
+            ss > 30.0,
+            ss - ln2,
+            torch.log(torch.cosh(ss).clamp_min(1.0)),
+        )
+        one_minus_v2 = (1.0 - vs.square()).clamp_min(0.0)
+        log_one_minus_v2 = torch.log(one_minus_v2.clamp_min(torch.finfo(ss.dtype).tiny))
+        log_a = log_one_minus_v2 + log_cosh_s  # log((1-v^2) cosh s)
+        log_b = torch.log(vs.square().clamp_min(torch.finfo(ss.dtype).tiny))
+        log_arg = torch.logaddexp(log_a, log_b)
+        log_arg = log_arg.clamp_min(0.0)
+        inner = (1.0 - torch.exp(-2.0 * log_arg)).clamp_min(0.0)
+        return log_arg + torch.log1p(inner.sqrt())
 
     @staticmethod
     @torch.no_grad()
@@ -244,6 +378,53 @@ class FreeHyperbolicHeatKernel:
 
     @staticmethod
     @torch.no_grad()
+    def free_poincare_heat_kernel(
+        ts: torch.FloatTensor,
+        output_coord: Optional[str] = None,
+    ):
+        # TODO: Implement free heat kernel on Poincare disk model
+    
+    @staticmethod
+    @torch.no_grad()
+    def free_lorentz_heat_kernel(
+        ts: torch.FloatTensor,
+        output_coord: Optional[str] = None,
+    ):
+        # TODO: Implement free heat kernel on Lorentz model
+        rhos, thetas = FreeBinaryHyperbolicHeatKernel.free_poincare_heat_kernel(ts=ts, output_coord=Coordinate.POLAR)
+        if output_coord == Coordinate.POLAR:
+            return rhos, thetas
+        else:
+            return FreeBinaryHyperbolicHeatKernel.poincare_polar_to_lorentz_cartesian(rhos=rhos, thetas=thetas)
+
+    @staticmethod
+    @torch.no_grad()
+    def geodesic(
+        t: torch.FloatTensor,
+        src: Optional[torch.FloatTensor] = None,
+        dest: Optional[torch.FloatTensor] = None,
+        src_radial: Optional[torch.FloatTensor] = None,
+        src_angular: Optional[torch.FloatTensor] = None,
+        dest_radial: Optional[torch.FloatTensor] = None,
+        dest_angular: Optional[torch.FloatTensor] = None,
+        output_coord: Optional[str] = None,
+    ):
+        if (src is not None and (src_radial is not None or src_angular is not None)) or (src is None and (src_radial is None or src_angular is None)):
+            raise ValueError(f"Only accept one source, either src or (src_radial, src_angular)")
+        if (dest is not None and (dest_radial is not None or dest_angular is not None)) or (dest is None and (dest_radial is None or dest_angular is None)):
+            raise ValueError(f"Only accept one destination, either src or (dest_radial, dest_angular)")
+        
+        # Decide the cooridnate of the output
+        if output_coord is None:
+            if src is not None:
+                output_coord = Coordinate.CARTESIAN
+            else:
+                output_coord = Coordinate.POLAR
+
+        # TODO: Implement the geodesic calculation in a numerical stable and efficient way and convert to correct coordinate
+
+    @staticmethod
+    @torch.no_grad()
     def hyperbolic_bridge(
         ts: torch.FloatTensor,
         targets: torch.LongTensor,
@@ -252,8 +433,11 @@ class FreeHyperbolicHeatKernel:
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
         r"""
         Boundary-conditioned posterior sampler. Draws a free sample `(rho, u_free)` (with
-        `u_free` conditioned on `x = e_1`), then rotates `u_free` so that `e_1 -> x_target`
-        via a per-sample Householder reflection. The radial coordinate is unchanged. At
+        `u_free` conditioned on `x = e_1`), then applies a per-sample Householder reflection
+        that maps `e_1 -> x_target`. The angular conditional density depends only on
+        `<u, e_1>` (invariant under `O(d-1)` of the orthogonal complement), so the reflection
+        produces the correct marginal even though it has determinant `-1`. The radial
+        coordinate is unchanged. At
         `d == 2` the call short-circuits to
         [`FreeBinaryHyperbolicHeatKernel.binary_hyperbolic_bridge`].
 
@@ -303,8 +487,23 @@ class FreeHyperbolicHeatKernel:
         rhos, u = FreeHyperbolicHeatKernel.free_hyperbolic_heat_kernel(ts, d=d, method=method)
         x = word_embedding[targets].to(ts.dtype)
         x = x / x.norm(dim=-1, keepdim=True).clamp_min(1e-300)
-        u_rot = FreeHyperbolicHeatKernel._rotate_to_target(u, x)
-        return rhos, u_rot
+        u_reflected = FreeHyperbolicHeatKernel._reflect_to_target(u, x)
+        return rhos, u_reflected
+
+    @staticmethod
+    @torch.no_grad()
+    def lorentz_bridge(
+        ts: torch.FloatTensor,
+        targets: torch.LongTensor,
+        word_embedding: torch.FloatTensor,
+        output_coord: Optional[str] = None,
+    ):
+        # TODO: Finish this
+        if output_coord == Coordinate.POLAR:
+            pass
+            # TODO: Finish this
+        else:
+            # TODO: Finish this
 
     # ------------------------------------------------------------------
     # Private angular samplers
@@ -329,31 +528,37 @@ class FreeHyperbolicHeatKernel:
             `torch.FloatTensor` of shape `(batch_size, d)` on `S^{d-1}`.
         """
         B = rhos.shape[0]
-        u0 = torch.randn(B, d, dtype=rhos.dtype, device=rhos.device)
-        u0 = u0 / u0.norm(dim=-1, keepdim=True).clamp_min(1e-300)
-        ch = torch.cosh(rhos)
-        sh = torch.sinh(rhos)
-        u0_0 = u0[..., 0]
-        time_after = ch + sh * u0_0
-        spatial_0 = sh + ch * u0_0
-        u = u0.clone()
-        u[..., 0] = spatial_0
-        u = u / time_after.unsqueeze(-1)
-        u = u / u.norm(dim=-1, keepdim=True).clamp_min(1e-300)
+        dtype = rhos.dtype
+        device = rhos.device
+        tiny = torch.finfo(dtype).tiny
+        u0 = torch.randn(B, d, dtype=dtype, device=device)
+        u0 = u0 / u0.norm(dim=-1, keepdim=True).clamp_min(tiny)
+        c0 = u0[..., 0]
+        # Stable Lorentz-boost: factor out e^rho so cosh/sinh do not overflow.
+        # u_new[0] = 1 - 2 b (1 - c0) / ((1 + c0) + b (1 - c0)); preserves precision of 1-c.
+        # u_new[i>=1] = 2 e^{-rho} u0[i] / ((1 + c0) + b (1 - c0)) where b = e^{-2 rho}.
+        b = torch.exp(-2.0 * rhos)
+        exp_neg_rho = torch.exp(-rhos)
+        one_plus_c0 = 1.0 + c0
+        one_minus_c0 = 1.0 - c0
+        T_half = (one_plus_c0 + b * one_minus_c0).clamp_min(tiny)
+        u = torch.empty(B, d, dtype=dtype, device=device)
+        u[..., 0] = (1.0 - 2.0 * b * one_minus_c0 / T_half).clamp(-1.0, 1.0)
+        u[..., 1:] = (2.0 * exp_neg_rho / T_half).unsqueeze(-1) * u0[..., 1:]
         return u
 
     @staticmethod
     @torch.no_grad()
     def _angular_icdf(rhos: torch.FloatTensor, d: int) -> torch.FloatTensor:
-        r"""Grid-based inverse-CDF on `c = <e_1, u>` against the angular marginal.
+        r"""Inverse-CDF on `c = <e_1, u>` against the angular marginal.
 
-        The marginal density of `c` is
-        `f(c) propto (1 - c^2)^{(d-3)/2} * (cosh rho - sinh rho * c)^{-(d-1)}` on `[-1, 1]`.
-        Build the unnormalized CDF on a 1024-node uniform grid in log-space (to avoid
-        overflow at large rho), invert via vectorized binary search, then pair `c` with
-        `w ~ Unif(S^{d-2})` to assemble `u = (c, sqrt(1 - c^2) w)`. Falls back to
-        `_angular_boost` for `rho > 30` where the integrand concentrates beyond grid
-        resolution.
+        Uses the Mobius-transform identity: if `c0 = 2 X - 1` with `X ~ Beta((d-1)/2, (d-1)/2)`
+        (the marginal of a uniform direction on `S^{d-1}`), then
+        `c = (cosh rho * c0 + sinh rho) / (cosh rho + sinh rho * c0)` has density
+        proportional to `(1 - c^2)^{(d-3)/2} (cosh rho - sinh rho c)^{-(d-1)}` on `[-1, 1]`.
+        Sampling `X` from the Beta distribution is an exact inverse-CDF draw, after which the
+        Mobius map yields `c` analytically. Then `c` is paired with `w ~ Unif(S^{d-2})` so
+        that `u = (c, sqrt(1 - c^2) w)`.
 
         Args:
             rhos (`torch.FloatTensor` of shape `(batch_size,)`).
@@ -366,88 +571,40 @@ class FreeHyperbolicHeatKernel:
         dtype = rhos.dtype
         device = rhos.device
 
-        large = rhos > 30.0
-        small = rhos < 1e-3
-        normal = ~(large | small)
+        tiny = torch.finfo(dtype).tiny
+        alpha = torch.full((B,), (d - 1) / 2.0, dtype=dtype, device=device)
+        z = torch.distributions.Beta(alpha, alpha).sample()
+        # Stable Mobius transform: `c = 1 - 2 b (1 - z) / (z + b (1 - z))` with
+        # `b = e^{-2 rho}`. Preserves precision of `1 - c` when `b` is tiny.
+        b = torch.exp(-2.0 * rhos)
+        denom = (z + b * (1.0 - z)).clamp_min(tiny)
+        c = (1.0 - 2.0 * b * (1.0 - z) / denom).clamp(-1.0, 1.0)
 
-        u_out = torch.empty(B, d, dtype=dtype, device=device)
-
-        if large.any():
-            u_out[large] = FreeHyperbolicHeatKernel._angular_boost(rhos[large], d)
-
-        # Assemble `c` for small + normal samples; we'll attach w later for both.
-        non_large = ~large
-        if non_large.any():
-            c_non_large = torch.empty(int(non_large.sum().item()), dtype=dtype, device=device)
-            # local boolean masks restricted to the non_large block
-            small_in_block = small[non_large]
-            normal_in_block = normal[non_large]
-
-            if small_in_block.any():
-                alpha = torch.full(
-                    (int(small_in_block.sum().item()),),
-                    (d - 1) / 2.0,
-                    dtype=dtype, device=device,
-                )
-                beta_dist = torch.distributions.Beta(alpha, alpha)
-                c_non_large[small_in_block] = 2.0 * beta_dist.sample() - 1.0
-
-            if normal_in_block.any():
-                rhos_n = rhos[non_large][normal_in_block]
-                Bn = rhos_n.shape[0]
-                n_nodes = 1024
-                grid = torch.linspace(-1.0, 1.0, n_nodes, dtype=dtype, device=device)
-                one_minus_c2 = (1 - grid.square()).clamp_min(1e-300)
-                log_factor1 = ((d - 3) / 2.0) * torch.log(one_minus_c2)
-                ch = torch.cosh(rhos_n).unsqueeze(-1)
-                sh = torch.sinh(rhos_n).unsqueeze(-1)
-                arg = (ch - sh * grid.unsqueeze(0)).clamp_min(1e-300)
-                log_density = log_factor1.unsqueeze(0) - (d - 1) * torch.log(arg)
-                log_density = log_density - log_density.max(dim=-1, keepdim=True).values
-                density = torch.exp(log_density)
-                dgrid = grid[1:] - grid[:-1]
-                cdf_inc = 0.5 * (density[:, 1:] + density[:, :-1]) * dgrid.unsqueeze(0)
-                cdf = torch.cat(
-                    [torch.zeros(Bn, 1, dtype=dtype, device=device),
-                     torch.cumsum(cdf_inc, dim=-1)], dim=-1,
-                )
-                cdf = cdf / cdf[:, -1:].clamp_min(1e-300)
-
-                q = torch.rand(Bn, dtype=dtype, device=device)
-                idx = torch.searchsorted(cdf, q.unsqueeze(-1)).squeeze(-1).clamp(1, n_nodes - 1)
-                idx_lo = idx - 1
-                cdf_lo = torch.gather(cdf, 1, idx_lo.unsqueeze(-1)).squeeze(-1)
-                cdf_hi = torch.gather(cdf, 1, idx.unsqueeze(-1)).squeeze(-1)
-                c_lo = grid[idx_lo]
-                c_hi = grid[idx]
-                frac = (q - cdf_lo) / (cdf_hi - cdf_lo).clamp_min(1e-300)
-                c_n = (c_lo + frac * (c_hi - c_lo)).clamp(-1.0, 1.0)
-                c_non_large[normal_in_block] = c_n
-
-            n_nl = c_non_large.shape[0]
-            w = torch.randn(n_nl, d - 1, dtype=dtype, device=device)
-            w = w / w.norm(dim=-1, keepdim=True).clamp_min(1e-300)
-            s = (1 - c_non_large.square()).clamp_min(0.0).sqrt()
-            u_nl = torch.empty(n_nl, d, dtype=dtype, device=device)
-            u_nl[:, 0] = c_non_large
-            u_nl[:, 1:] = s.unsqueeze(-1) * w
-            u_out[non_large] = u_nl
-
-        u_out = u_out / u_out.norm(dim=-1, keepdim=True).clamp_min(1e-300)
-        return u_out
+        w = torch.randn(B, d - 1, dtype=dtype, device=device)
+        w = w / w.norm(dim=-1, keepdim=True).clamp_min(tiny)
+        s = (1.0 - c.square()).clamp_min(0.0).sqrt()
+        u = torch.empty(B, d, dtype=dtype, device=device)
+        u[:, 0] = c
+        u[:, 1:] = s.unsqueeze(-1) * w
+        return u
 
     @staticmethod
     @torch.no_grad()
     def _angular_vmf(rhos: torch.FloatTensor, d: int) -> torch.FloatTensor:
-        r"""Gamma-vMF mixture: `lambda ~ Gamma(d-1, cosh rho)`, then `u ~ vMF(e_1, kappa)`
-        with `kappa = lambda * sinh rho`, drawn via Wood (1994) rejection sampling.
+        r"""Wood-style Beta envelope tuned to the angular conditional.
 
-        Wood's algorithm samples the cosine `w = <mu, u>` via a Beta proposal:
-            b  = (d - 1) / (2*kappa + sqrt(4*kappa^2 + (d-1)^2))   # conjugate form, stable for large kappa
-            x  = (1 - b) / (1 + b);  c0 = kappa * x + (d - 1) * log(1 - x^2)
-            z  ~ Beta((d-1)/2, (d-1)/2);  w = (1 - (1+b) z) / (1 - (1-b) z)
-            accept if log(U) <= kappa * w + (d - 1) * log(1 - x*w) - c0,  U ~ U(0, 1)
-        Cap at 50 iterations; fall back to `_angular_boost` for unaccepted samples.
+        Wood (1994)'s vMF envelope is `(1 - x^2)/(1 - x w)^2` with a free tuning parameter
+        `x`. For the target `(1 - w^2)^{(d-3)/2} (cosh rho - sinh rho w)^{-(d-1)}` the
+        envelope reduces to the target itself when `x = tanh rho` (acceptance probability is
+        identically `1`). Set `b = e^{-2 rho} = (1 - tanh rho)/(1 + tanh rho)` and use the
+        Wood proposal `w = (1 - (1+b) z) / (1 - (1-b) z)` with `z ~ Beta((d-1)/2, (d-1)/2)`,
+        which is exact without rejection. Pair with `v ~ Unif(S^{d-2})`.
+
+        Note: under the symmetry `z <-> 1 - z` of `Beta((d-1)/2, (d-1)/2)`, this Mobius
+        transform is algebraically identical to the one used by `_angular_icdf`. The two
+        methods therefore produce identically distributed samples and consume the same RNG
+        budget per call. Both are kept as separate entry points to expose the boost/icdf/vmf
+        triple from the spec, but cross-method KS at d>=3 is by construction trivial.
 
         Args:
             rhos (`torch.FloatTensor` of shape `(batch_size,)`).
@@ -459,59 +616,27 @@ class FreeHyperbolicHeatKernel:
         B = rhos.shape[0]
         dtype = rhos.dtype
         device = rhos.device
+        tiny = torch.finfo(dtype).tiny
 
-        ch = torch.cosh(rhos)
-        sh = torch.sinh(rhos)
-        conc = torch.full((B,), float(d - 1), dtype=dtype, device=device)
-        lam = torch.distributions.Gamma(conc, ch).sample()
-        kappa = (lam * sh).clamp_min(1e-300)
+        b = torch.exp(-2.0 * rhos)
+        alpha = torch.full((B,), (d - 1) / 2.0, dtype=dtype, device=device)
+        z = torch.distributions.Beta(alpha, alpha).sample()
+        # Stable form of `(1 - (1+b)z)/(1 - (1-b)z) = 1 - 2 b z / (1 - z + b z)`; the latter
+        # preserves precision of `1 - w` when `b` is tiny (large rho).
+        denom = (1.0 - z + b * z).clamp_min(tiny)
+        w = (1.0 - 2.0 * b * z / denom).clamp(-1.0, 1.0)
 
-        dm1 = float(d - 1)
-        b = dm1 / (2.0 * kappa + torch.sqrt(4.0 * kappa.square() + dm1 ** 2))
-        x = (1.0 - b) / (1.0 + b)
-        c0 = kappa * x + dm1 * torch.log((1.0 - x.square()).clamp_min(1e-300))
-
-        w_out = torch.zeros(B, dtype=dtype, device=device)
-        accepted = torch.zeros(B, dtype=torch.bool, device=device)
-        alpha = torch.full((B,), dm1 / 2.0, dtype=dtype, device=device)
-        beta_dist = torch.distributions.Beta(alpha, alpha)
-
-        for _ in range(50):
-            if accepted.all():
-                break
-            z = beta_dist.sample()
-            denom = (1.0 - (1.0 - b) * z).clamp_min(1e-300)
-            w = (1.0 - (1.0 + b) * z) / denom
-            log_u = torch.log(torch.rand(B, dtype=dtype, device=device).clamp_min(1e-300))
-            test = kappa * w + dm1 * torch.log((1.0 - x * w).clamp_min(1e-300)) - c0
-            new_accept = (~accepted) & (log_u <= test)
-            w_out = torch.where(new_accept, w, w_out)
-            accepted = accepted | new_accept
-
-        u_out = torch.empty(B, d, dtype=dtype, device=device)
-
-        if accepted.any():
-            acc_idx = accepted
-            n_acc = int(acc_idx.sum().item())
-            v = torch.randn(n_acc, d - 1, dtype=dtype, device=device)
-            v = v / v.norm(dim=-1, keepdim=True).clamp_min(1e-300)
-            w_acc = w_out[acc_idx].clamp(-1.0, 1.0)
-            s = (1.0 - w_acc.square()).clamp_min(0.0).sqrt()
-            u_acc = torch.empty(n_acc, d, dtype=dtype, device=device)
-            u_acc[:, 0] = w_acc
-            u_acc[:, 1:] = s.unsqueeze(-1) * v
-            u_out[acc_idx] = u_acc
-
-        if not accepted.all():
-            unacc = ~accepted
-            u_out[unacc] = FreeHyperbolicHeatKernel._angular_boost(rhos[unacc], d)
-
-        u_out = u_out / u_out.norm(dim=-1, keepdim=True).clamp_min(1e-300)
-        return u_out
+        v = torch.randn(B, d - 1, dtype=dtype, device=device)
+        v = v / v.norm(dim=-1, keepdim=True).clamp_min(tiny)
+        s = (1.0 - w.square()).clamp_min(0.0).sqrt()
+        u = torch.empty(B, d, dtype=dtype, device=device)
+        u[:, 0] = w
+        u[:, 1:] = s.unsqueeze(-1) * v
+        return u
 
     @staticmethod
     @torch.no_grad()
-    def _rotate_to_target(u: torch.FloatTensor, x: torch.FloatTensor) -> torch.FloatTensor:
+    def _reflect_to_target(u: torch.FloatTensor, x: torch.FloatTensor) -> torch.FloatTensor:
         r"""Per-sample Householder reflection mapping `e_1 -> x` applied to `u`.
 
         Use the Householder reflection with reflection axis `v = e_1 - x` (unit):
