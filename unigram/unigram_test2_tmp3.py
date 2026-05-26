@@ -201,7 +201,31 @@ class HyperBridge:
         return (d - 1) ** 2 / 2 * HyperBridge._lorentz_norm_sq(residual)
 
     @staticmethod
-    def binary_nelbo_loss(logits, targets, rhos, thetas, proposal_weight, loss_geometry="poincare_polar"):
+    def binary_bridge_loss_crossentropy(logits, targets, rhos, thetas):
+        (N,) = targets.shape
+        (N,V) = logits.shape
+        device = rhos.device
+        assert(rhos.shape == (N,))
+        assert(thetas.shape == (N,))
+        assert(targets.dtype == torch.int64)
+        assert(rhos.dtype == torch.float64)
+        assert(thetas.dtype == torch.float64)
+        # construct phis
+        phis = (
+            torch.arange(V, device=device, dtype=torch.float64) + 0.5
+        ) * (2 * torch.pi / V)
+        # first, we get the horosphere distances
+        alphas = thetas[:,None] - phis[None,:]  # angular offsets between z and v
+        cos_alphas = alphas.cos()
+        sin_alphas = alphas.sin()
+        log_two = torch.log(torch.tensor(2.0, device=device, dtype=torch.float64))
+        horosphere_dists = log_two - torch.logaddexp((1 - cos_alphas).log() + rhos[:,None], (1 + cos_alphas).log() - rhos[:,None])
+        # remake mu and subtract the target
+        mu = (horosphere_dists + logits.to(torch.float64)).softmax(-1)
+        return (d - 1) ** 2 / 2 * HyperBridge._lorentz_norm_sq(residual)
+
+    @staticmethod
+    def weighted_binary_nelbo_loss(logits, targets, rhos, thetas, proposal_weight, loss_geometry="poincare_polar"):
         if loss_geometry == LossGeometry.POINCARE_POLAR:
             # print("Use POINCARE_POLAR")
             bridge = HyperBridge.binary_bridge_loss_poincare_disk_polar(
@@ -228,7 +252,7 @@ class HyperBridge:
             )
         else:
             raise ValueError(f"Unknown loss_geometry={loss_geometry!r}")
-        return bridge * proposal_weight.to(dtype=bridge.dtype)
+        return bridge * proposal_weight.to(dtype=bridge.dtype), bridge
 
     @staticmethod
     def proposal(
@@ -393,6 +417,15 @@ class HyperbolicDLM(L.LightningModule):
         self._test_epoch_loss_total = 0.0
         self._test_epoch_loss_sq_total = 0.0
         self._test_epoch_weight = 0
+        # Per-sample (timestep, loss, density) data collected over the test epoch.
+        self._test_ts_chunks: list[torch.Tensor] = []
+        self._test_loss_chunks: list[torch.Tensor] = []
+        self._test_nelbo_chunks: list[torch.Tensor] = []
+        self._test_weight_chunks: list[torch.Tensor] = []
+        self.test_timesteps: Optional[torch.Tensor] = None
+        self.test_losses: Optional[torch.Tensor] = None
+        self.test_nelbos: Optional[torch.Tensor] = None
+        self.test_proposal_weights: Optional[torch.Tensor] = None
 
         self.hyper_dim: int = config.get("hyper_dim", None)
         if self.hyper_dim is None:
@@ -457,7 +490,7 @@ class HyperbolicDLM(L.LightningModule):
         else:
             z = torch.stack([rhos, thetas], dim=-1).to(dtype=torch.float32)
         logits = self.model(z=z, t=ts.to(dtype=torch.float32))
-        nelbo = self.bridge.binary_nelbo_loss(
+        wnelbo, nelbo = self.bridge.weighted_binary_nelbo_loss(
             logits=logits,
             targets=targets,
             rhos=rhos,
@@ -467,7 +500,8 @@ class HyperbolicDLM(L.LightningModule):
         )
         ce = torch.nn.functional.cross_entropy(logits, targets, reduction="none")
         return {
-            "loss": nelbo,
+            "loss": wnelbo,
+            "wnelbo_loss": wnelbo,
             "nelbo_loss": nelbo,
             "ce": ce,
             "ts": ts.to(dtype=torch.float32),
@@ -537,6 +571,10 @@ class HyperbolicDLM(L.LightningModule):
         self._test_epoch_loss_total = 0.0
         self._test_epoch_loss_sq_total = 0.0
         self._test_epoch_weight = 0
+        self._test_ts_chunks = []
+        self._test_loss_chunks = []
+        self._test_nelbo_chunks = []
+        self._test_weight_chunks = []
 
     def test_step(self, batch: torch.Tensor, batch_idx: int):
         del batch_idx
@@ -548,6 +586,15 @@ class HyperbolicDLM(L.LightningModule):
         self._test_epoch_loss_total += float(loss_values.sum().cpu())
         self._test_epoch_loss_sq_total += float(loss_values.square().sum().cpu())
         self._test_epoch_weight += batch_size
+        # Record the per-sample (timestep, loss, weight) distribution.
+        self._test_ts_chunks.append(losses["ts"].detach().to(dtype=torch.float32, device="cpu"))
+        self._test_loss_chunks.append(loss_values.to(dtype=torch.float32, device="cpu"))
+        self._test_nelbo_chunks.append(
+            losses["nelbo_loss"].detach().to(dtype=torch.float32, device="cpu")
+        )
+        self._test_weight_chunks.append(
+            losses["proposal_weight"].detach().to(dtype=torch.float32, device="cpu")
+        )
         self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
         self.log("test_nelbo_loss", losses["nelbo_loss"].mean(), on_step=False, on_epoch=True, batch_size=batch_size)
         self.log("test_ce", losses["ce"].mean(), on_step=False, on_epoch=True, batch_size=batch_size)
@@ -573,6 +620,11 @@ class HyperbolicDLM(L.LightningModule):
             val=var_test_loss,
         )
         self.log("test_loss_var", torch.tensor(var_test_loss, device=self.device, dtype=torch.float64), prog_bar=True)
+        if self._test_ts_chunks:
+            self.test_timesteps = torch.cat(self._test_ts_chunks)
+            self.test_losses = torch.cat(self._test_loss_chunks)
+            self.test_nelbos = torch.cat(self._test_nelbo_chunks)
+            self.test_proposal_weights = torch.cat(self._test_weight_chunks)
 
 def save_results(res, folder, file_name: str = "test_metrics.json"):
     output_path = Path(folder) / file_name
@@ -583,6 +635,75 @@ def save_results(res, folder, file_name: str = "test_metrics.json"):
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
     return output_path
+
+def plot_test_loss_vs_timestep(
+    timesteps,
+    weighted_nelbo,
+    nelbo,
+    proposal_density,
+    fig_path,
+    data_path,
+    subsample: float = 1.0,
+    title: str = "test_loss vs timestep",
+):
+    """Record per-sample (timestep, loss, density) data and scatter-plot it.
+
+    Three series are plotted against `timesteps` on a shared log-x axis: the
+    importance-weighted NELBO, the unweighted NELBO (the loss integrand), and
+    the proposal density. `timesteps`, `weighted_nelbo`, `nelbo` and
+    `proposal_density` are equal-length 1-D sequences, one entry per test
+    sample. `subsample` is the fraction of points in [0.0, 1.0] to randomly
+    keep (1.0 keeps all); it governs both the JSON written to `data_path` and
+    the log-log scatter saved to `fig_path`. Returns the two output paths.
+    """
+    if not 0.0 <= subsample <= 1.0:
+        raise ValueError(f"subsample must be in [0.0, 1.0], got {subsample}")
+
+    ts = np.asarray(timesteps, dtype=np.float64).reshape(-1)
+    series = {
+        "weighted_nelbo": np.asarray(weighted_nelbo, dtype=np.float64).reshape(-1),
+        "nelbo": np.asarray(nelbo, dtype=np.float64).reshape(-1),
+        "proposal_density": np.asarray(proposal_density, dtype=np.float64).reshape(-1),
+    }
+    for name, arr in series.items():
+        if arr.shape != ts.shape:
+            raise ValueError(f"{name} and timesteps must have the same length")
+
+    keep = int(round(subsample * ts.size))
+    if keep < ts.size:
+        idx = np.random.default_rng(0).choice(ts.size, size=keep, replace=False)
+        ts = ts[idx]
+        series = {name: arr[idx] for name, arr in series.items()}
+
+    data_path, fig_path = Path(data_path), Path(fig_path)
+    data_path.parent.mkdir(parents=True, exist_ok=True)
+    with data_path.open("w", encoding="utf-8") as f:
+        json.dump(
+            {"timestep": ts.tolist(), **{n: a.tolist() for n, a in series.items()}}, f
+        )
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    panels = (
+        ("weighted_nelbo", "weighted NELBO"),
+        ("nelbo", "NELBO (unweighted)"),
+        ("proposal_density", "proposal density"),
+    )
+    fig, axes = plt.subplots(len(panels), 1, figsize=(8, 12), sharex=True)
+    for ax, (key, ylabel) in zip(axes, panels):
+        ax.scatter(ts, series[key], s=4, alpha=0.3)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+    axes[-1].set_xlabel("timestep")
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(fig_path, dpi=200)
+    plt.close(fig)
+    return {"data_path": data_path, "figure_path": fig_path}
 
 def name_ext(config):
     ext: str = ""
@@ -718,6 +839,9 @@ def main(cfg: DictConfig) -> None:
             "loss_plot_path": "plot.jpg",
             "loss_data_path": "data.json",
             "loss_plot_ma_window": None,
+            "ts_loss_plot_path": "test_loss_vs_timestep.jpg",
+            "ts_loss_data_path": "test_loss_vs_timestep.json",
+            "ts_loss_subsample": 1.0,
         }
     )
     cfg = OmegaConf.merge(defaults, cfg)
@@ -753,6 +877,19 @@ def main(cfg: DictConfig) -> None:
     )
     print(f"Saved loss data to: {saved['data_path']}")
     print(f"Saved loss plot to: {saved['figure_path']}")
+    if model.test_timesteps is not None:
+        proposal_density = 1.0 / model.test_proposal_weights
+        ts_saved = plot_test_loss_vs_timestep(
+            timesteps=model.test_timesteps,
+            weighted_nelbo=model.test_losses,
+            nelbo=model.test_nelbos,
+            proposal_density=proposal_density,
+            fig_path=os.path.join(cfg.folder, cfg.ts_loss_plot_path),
+            data_path=os.path.join(cfg.folder, cfg.ts_loss_data_path),
+            subsample=float(cfg.ts_loss_subsample),
+        )
+        print(f"Saved test_loss-vs-timestep data to: {ts_saved['data_path']}")
+        print(f"Saved test_loss-vs-timestep plot to: {ts_saved['figure_path']}")
     if test_metrics:
         print("Test metrics:")
         for name, value in test_metrics[0].items():
