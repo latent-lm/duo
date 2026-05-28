@@ -1,5 +1,5 @@
 import math
-from typing import Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -7,7 +7,13 @@ import torch.nn as nn
 class SmallMLP(nn.Module):
     """Tiny time-conditioned MLP that predicts a hyperbolic endpoint."""
 
-    def __init__(self, input_dim: int, hidden_size: int, depth: int, output_dim: int):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_size: int,
+        depth: int,
+        output_dim: int,
+    ):
         super().__init__()
         layers = []
         dim = input_dim
@@ -63,6 +69,107 @@ class MLPLM(nn.Module):
                 Vocabulary logits.
         """
         return self.lm_head(self.mlp(z=z, t=t))
+
+class MLPNLM(nn.Module):
+    """Tiny time-conditioned MLP language model with a weight-tied embedding table.
+
+    Flattens a fixed-length token sequence into a single vector, passes it through
+    one `SmallMLP` conditioned on a scalar time, and reshapes the output back to
+    per-position embeddings. Vocabulary logits are produced by projecting through
+    the same embedding table used at the input (weight tying), so freezing the
+    table freezes the lm-head too.
+
+    Args:
+        vocab_size: Vocabulary size.
+        embedding_size: Word-embedding dimension.
+        max_length: Fixed sequence length consumed by the model.
+        hidden_size: Width of each hidden layer in the inner `SmallMLP`.
+        depth: Number of hidden layers in the inner `SmallMLP`.
+        word_embedding: Optional `(vocab_size, embedding_size)` table used to
+            initialize the embedding. Frozen unless `trainable_word_embedding`.
+        trainable_word_embedding: If True the embedding table is trainable;
+            otherwise it is frozen.
+
+    Returns:
+        From `forward`: a tuple `(predicted_embedding, logits)` where
+        `predicted_embedding` has shape `(batch, max_length, embedding_size)` and
+        `logits` has shape `(batch, max_length, vocab_size)`.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        embedding_size: int,
+        max_length: int,
+        hidden_size: int,
+        depth: int,
+        word_embedding: Optional[torch.FloatTensor] = None,
+        trainable_word_embedding: bool = False,
+    ):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.embedding_size = embedding_size
+        self.max_length = max_length
+
+        if word_embedding is not None:
+            if tuple(word_embedding.shape) != (vocab_size, embedding_size):
+                raise ValueError(
+                    f"word_embedding must have shape ({vocab_size}, {embedding_size}); "
+                    f"got {tuple(word_embedding.shape)}"
+                )
+            self.embedding = nn.Embedding.from_pretrained(
+                word_embedding, freeze=not trainable_word_embedding
+            )
+        else:
+            self.embedding = nn.Embedding(vocab_size, embedding_size)
+            self.embedding.weight.requires_grad = trainable_word_embedding
+
+        self.mlp = SmallMLP(
+            input_dim=max_length * embedding_size + 1,
+            hidden_size=hidden_size,
+            depth=depth,
+            output_dim=max_length * embedding_size,
+        )
+
+    def normalize_word_embedding(self) -> torch.Tensor:
+        """Return the embedding table with each row rescaled to unit L2-norm.
+
+        Returns:
+            `torch.Tensor` of shape `(vocab_size, embedding_size)`.
+        """
+        w = self.embedding.weight
+        return w / w.norm(dim=-1, keepdim=True, p=2).clamp_min(1e-12)
+
+    def forward(
+        self,
+        ids: torch.LongTensor,
+        t: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Predict per-position embeddings and vocabulary logits.
+
+        Args:
+            ids (`torch.LongTensor` of shape `(batch, max_length)`):
+                Token ids.
+            t (`torch.Tensor` of shape `(batch,)` or `(batch, 1)`):
+                Per-example time values.
+
+        Returns:
+            `tuple[torch.Tensor, torch.Tensor]`:
+                `predicted_embedding` of shape `(batch, max_length, embedding_size)`
+                and `logits` of shape `(batch, max_length, vocab_size)`.
+        """
+        if ids.shape[1] != self.max_length:
+            raise ValueError(
+                f"ids must have shape (batch, {self.max_length}); got {tuple(ids.shape)}"
+            )
+        batch = ids.shape[0]
+        e = self.embedding(ids)
+        z = e.reshape(batch, self.max_length * self.embedding_size)
+        out = self.mlp(z, t)
+        predicted_embedding = out.reshape(batch, self.max_length, self.embedding_size)
+        logits = predicted_embedding @ self.embedding.weight.T
+        return predicted_embedding, logits
 
 def polar_to_cart(rho: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
     """

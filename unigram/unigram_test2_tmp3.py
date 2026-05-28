@@ -30,6 +30,8 @@ class LossGeometry:
     POINCARE_CARTESIAN: str = "poincare_cartesian"
     LORENTZ_POLAR: str = "lorentz_polar"
     LORENTZ_CARTESIAN: str = "lorentz_cartesian"
+    HORO_CROSS_ENTROPY: str = "horo_cross_entropy"
+    CROSS_ENTROPY: str = "cross_entropy"
 
 class HyperBridge:
     PROPOSAL_EXP_NAME: str = "exp"
@@ -201,7 +203,7 @@ class HyperBridge:
         return (d - 1) ** 2 / 2 * HyperBridge._lorentz_norm_sq(residual)
 
     @staticmethod
-    def binary_bridge_loss_crossentropy(logits, targets, rhos, thetas):
+    def binary_bridge_loss_horo_crossentropy(logits, targets, rhos, thetas):
         (N,) = targets.shape
         (N,V) = logits.shape
         device = rhos.device
@@ -222,10 +224,58 @@ class HyperBridge:
         horosphere_dists = log_two - torch.logaddexp((1 - cos_alphas).log() + rhos[:,None], (1 + cos_alphas).log() - rhos[:,None])
         # remake mu and subtract the target
         mu = (horosphere_dists + logits.to(torch.float64)).softmax(-1)
-        return (d - 1) ** 2 / 2 * HyperBridge._lorentz_norm_sq(residual)
+        return torch.nn.functional.cross_entropy(mu, targets, reduction='none')
 
     @staticmethod
-    def weighted_binary_nelbo_loss(logits, targets, rhos, thetas, proposal_weight, loss_geometry="poincare_polar"):
+    def binary_bridge_loss_crossentropy(logits, targets, rhos, thetas):
+        return torch.nn.functional.cross_entropy(logits, targets, reduction='none')
+
+    @staticmethod
+    def weighted_binary_loss(logits, targets, rhos, thetas, proposal_weight, loss_geometry="poincare_polar"):
+        if loss_geometry == LossGeometry.POINCARE_POLAR:
+            # print("Use POINCARE_POLAR")
+            bridge = HyperBridge.binary_bridge_loss_poincare_disk_polar(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+            )
+        elif loss_geometry == LossGeometry.POINCARE_CARTESIAN:
+            # print("Use POINCARE_CARTESIAN")
+            bridge = HyperBridge.binary_bridge_loss_poincare_disk_cartesian(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+            )
+        elif loss_geometry == LossGeometry.LORENTZ_CARTESIAN:
+            # print("Use LORENTZ_CARTESIAN")
+            bridge = HyperBridge.binary_bridge_loss_lorentz(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+            )
+        elif loss_geometry == LossGeometry.HORO_CROSS_ENTROPY:
+            bridge = HyperBridge.binary_bridge_loss_horo_crossentropy(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+            )
+        elif loss_geometry == LossGeometry.CROSS_ENTROPY:
+            bridge = HyperBridge.binary_bridge_loss_crossentropy(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+            )
+        else:
+            raise ValueError(f"Unknown loss_geometry={loss_geometry!r}")
+        return bridge * proposal_weight.to(dtype=bridge.dtype), bridge
+
+    @staticmethod
+    def weighted_binary_nelbo(logits, targets, rhos, thetas, proposal_weight, loss_geometry="poincare_polar"):
         if loss_geometry == LossGeometry.POINCARE_POLAR:
             # print("Use POINCARE_POLAR")
             bridge = HyperBridge.binary_bridge_loss_poincare_disk_polar(
@@ -263,6 +313,7 @@ class HyperBridge:
         unif_min: float,
         unif_max: float,
         exp_rate: float,
+        generator: Optional[torch.Generator] = None,
     ):
         proposal_type = proposal_type.lower()
         interval = float(unif_max - unif_min)
@@ -270,7 +321,7 @@ class HyperBridge:
             raise ValueError("proposal requires unif_max >= unif_min")
 
         if proposal_type == HyperBridge.PROPOSAL_UNIF_NAME:
-            ts = unif_min + interval * torch.rand(shape, device=device, dtype=dtype)
+            ts = unif_min + interval * torch.rand(shape, device=device, dtype=dtype, generator=generator)
             weights = torch.full_like(ts, interval)
             return ts, weights
         elif proposal_type == HyperBridge.PROPOSAL_TRUNCATED_EXP_NAME:
@@ -279,7 +330,7 @@ class HyperBridge:
             if interval == 0:
                 ts = torch.full(shape, unif_min, device=device, dtype=dtype)
                 return ts, torch.zeros_like(ts)
-            u = torch.rand(shape, device=device, dtype=dtype).clamp(
+            u = torch.rand(shape, device=device, dtype=dtype, generator=generator).clamp(
                 min=1e-12,
                 max=1 - 1e-12,
             )
@@ -295,7 +346,7 @@ class HyperBridge:
             if interval == 0:
                 ts = torch.zeros(shape, device=device, dtype=dtype)
                 return ts, torch.zeros_like(ts)
-            u = torch.rand(shape, device=device, dtype=dtype).clamp(
+            u = torch.rand(shape, device=device, dtype=dtype, generator=generator).clamp(
                 min=1e-12,
                 max=1 - 1e-12,
             )
@@ -311,9 +362,9 @@ class HyperBridge:
                 numel *= int(dim)
             u = (
                 torch.arange(numel, device=device, dtype=dtype)
-                + torch.rand(numel, device=device, dtype=dtype)
+                + torch.rand(numel, device=device, dtype=dtype, generator=generator)
             ) / numel
-            u = u.view(-1)[torch.randperm(u.numel(), device=device)].view(u.shape)
+            u = u.view(-1)[torch.randperm(u.numel(), device=device, generator=generator)].view(u.shape)
             u = u.clamp(min=1e-12, max=1 - 1e-12).reshape(shape)
             # The same ts sampling as: ts = - torch.log(u) / exp_rate
             # ts = - torch.log1p(-u) / exp_rate
@@ -383,6 +434,7 @@ class HyperBridge:
         dt: float = 0.01,
         T: int = 1000,
         exp_rate: float = 1.0,
+        generator: Optional[torch.Generator] = None,
     ):
         if dt is None or T is None or dt <= 0.0 or T <= 0:
             raise ValueError("dt and T must be positive for hyper_proposal.")
@@ -399,6 +451,7 @@ class HyperBridge:
             unif_min=unif_min,
             unif_max=unif_max,
             exp_rate=exp_rate,
+            generator=generator,
         )
         return ts, proposal_weight
         
@@ -417,6 +470,12 @@ class HyperbolicDLM(L.LightningModule):
         self._test_epoch_loss_total = 0.0
         self._test_epoch_loss_sq_total = 0.0
         self._test_epoch_weight = 0
+        self._test_epoch_wnelbo_total = 0.0
+        self._test_epoch_wnelbo_sq_total = 0.0
+        self._test_epoch_nelbo_total = 0.0
+        self._test_epoch_nelbo_sq_total = 0.0
+        self._test_epoch_ce_total = 0.0
+        self._test_epoch_ce_sq_total = 0.0
         # Per-sample (timestep, loss, density) data collected over the test epoch.
         self._test_ts_chunks: list[torch.Tensor] = []
         self._test_loss_chunks: list[torch.Tensor] = []
@@ -438,8 +497,6 @@ class HyperbolicDLM(L.LightningModule):
         
         if "lorentz" in self.loss_geometry:
             self.model_input_dim = self.hyper_dim + 1
-
-        self.rotate_emb = config.get("rotate_emb", None)
 
         if self.mode == "tnb":
             self.model = MLPLM(
@@ -466,59 +523,132 @@ class HyperbolicDLM(L.LightningModule):
         numerator = sq_total - total * total / count
         return max(numerator, 0.0) / (count - 1)
 
-    def _compute_losses(self, batch: torch.Tensor):
-        targets = batch.reshape(-1).to(device=self.device, dtype=torch.long)
-        batch_size = targets.shape[0]
+    @staticmethod
+    def _std_from_sums(total: float, sq_total: float, count: int) -> float:
+        return HyperbolicDLM._variance_from_sums(total=total, sq_total=sq_total, count=count) ** 0.5
 
+    def get_logits_inputs(
+        self,
+        batch_size: int,
+        targets: torch.LongTensor,
+        hyper_dt: float,
+        hyper_T: int,
+        proposal_type: str,
+        proposal_exp_rate: float,
+        vocab_size: int,
+        device: torch.device,
+        generator: Optional[torch.Generator] = None,
+    ):
         ts, proposal_weight = self.bridge.hyper_proposal(
-            proposal_type=self.config.proposal_type,
+            proposal_type=proposal_type,
             shape=(batch_size,),
-            device=self.device,
+            device=device,
             dtype=torch.float64,
-            dt=self.config.hyper_dt,
-            T=self.config.hyper_T,
-            exp_rate=self.config.proposal_exp_rate,
+            dt=hyper_dt,
+            T=hyper_T,
+            exp_rate=proposal_exp_rate,
+            generator=generator,
         )
 
         rhos, thetas = self.bridge.binary_bridge(ts=ts)
-        if self.rotate_emb:
-            thetas = thetas + (
-                targets.to(dtype=torch.float64) + 0.5
-            ) * (2 * torch.pi / int(self.config.vocab_size))
+        # if self.rotate_emb:
+        # For calculating posterior
+        thetas = thetas + (
+            targets.to(dtype=torch.float64) + 0.5
+        ) * (2 * torch.pi / int(vocab_size))
+
         if "lorentz" in self.loss_geometry:
             z = self.bridge.polar_to_lorentz(rhos, thetas).to(dtype=torch.float32)
         else:
             z = torch.stack([rhos, thetas], dim=-1).to(dtype=torch.float32)
         logits = self.model(z=z, t=ts.to(dtype=torch.float32))
-        wnelbo, nelbo = self.bridge.weighted_binary_nelbo_loss(
-            logits=logits,
+        return logits, ts, rhos, thetas, proposal_weight
+
+    def _make_step_generator(self, salt: int) -> torch.Generator:
+        """Per-step, per-path torch.Generator on self.device."""
+        STEP_STRIDE = 1_000_003
+        seed_value = (
+            int(self.config.seed) * STEP_STRIDE
+            + int(self.global_step) * 2
+            + int(salt)
+        ) & 0x7FFF_FFFF_FFFF_FFFF
+        return torch.Generator(device=self.device).manual_seed(seed_value)
+
+    def _compute_losses(self, batch: torch.Tensor):
+        targets = batch.reshape(-1).to(device=self.device, dtype=torch.long)
+        batch_size = targets.shape[0]
+
+        loss_gen = self._make_step_generator(salt=0)
+        loss_logits, ts_loss, rhos_loss, thetas_loss, pw_loss = self.get_logits_inputs(
+            batch_size=batch_size,
             targets=targets,
-            rhos=rhos,
-            thetas=thetas,
-            proposal_weight=proposal_weight,
+            hyper_dt=self.config.hyper_dt,
+            hyper_T=self.config.hyper_T,
+            proposal_type=self.config.loss_proposal_type,
+            proposal_exp_rate=self.config.loss_proposal_exp_rate,
+            vocab_size=self.config.vocab_size,
+            device=self.device,
+            generator=loss_gen,
+        )
+        wloss, loss = self.bridge.weighted_binary_loss(
+            logits=loss_logits,
+            targets=targets,
+            rhos=rhos_loss,
+            thetas=thetas_loss,
+            proposal_weight=pw_loss,
             loss_geometry=self.loss_geometry,
         )
-        ce = torch.nn.functional.cross_entropy(logits, targets, reduction="none")
+        ce = torch.nn.functional.cross_entropy(loss_logits, targets, reduction="none")
+
+        if (self.config.nelbo_proposal_type == self.config.loss_proposal_type
+              and self.config.nelbo_proposal_exp_rate == self.config.loss_proposal_exp_rate
+              and self.config.nelbo_geometry == self.loss_geometry
+              and self.config.loss_geometry not in {LossGeometry.CROSS_ENTROPY, LossGeometry.HORO_CROSS_ENTROPY}):
+            # Identical configs — reuse the loss-path computation.
+            wnelbo = wloss
+            nelbo = loss
+            ts_nelbo = ts_loss
+            pw_nelbo = pw_loss
+        else:
+            nelbo_gen = self._make_step_generator(salt=1)
+            nelbo_logits, ts_nelbo, rhos_nelbo, thetas_nelbo, pw_nelbo = self.get_logits_inputs(
+                batch_size=batch_size,
+                targets=targets,
+                hyper_dt=self.config.hyper_dt,
+                hyper_T=self.config.hyper_T,
+                proposal_type=self.config.nelbo_proposal_type,
+                proposal_exp_rate=self.config.nelbo_proposal_exp_rate,
+                vocab_size=self.config.vocab_size,
+                device=self.device,
+                generator=nelbo_gen,
+            )
+            wnelbo, nelbo = self.bridge.weighted_binary_nelbo(
+                logits=nelbo_logits,
+                targets=targets,
+                rhos=rhos_nelbo,
+                thetas=thetas_nelbo,
+                proposal_weight=pw_nelbo,
+                loss_geometry=self.config.nelbo_geometry,
+            )
+
         return {
-            "loss": wnelbo,
+            "loss": wloss,
             "wnelbo_loss": wnelbo,
             "nelbo_loss": nelbo,
             "ce": ce,
-            "ts": ts.to(dtype=torch.float32),
-            "proposal_weight": proposal_weight.to(dtype=torch.float32),
-            "rhos": rhos.to(dtype=torch.float32),
-            "thetas": thetas.to(dtype=torch.float32),
+            "ts": ts_nelbo.to(dtype=torch.float32),
+            "proposal_weight": pw_nelbo.to(dtype=torch.float32),
         }
 
     def training_step(self, batch: torch.Tensor, batch_idx: int):
         del batch_idx
         losses = self._compute_losses(batch)
         loss = losses["loss"].mean()
-        loss_var = losses["loss"].var()
+        loss_std = losses["loss"].std()
         self.recorder.add("train_loss", step=int(self.global_step) + 1, val=loss)
-        self.recorder.add("train_loss_var", step=int(self.global_step) + 1, val=loss_var)
+        self.recorder.add("train_loss_std", step=int(self.global_step) + 1, val=loss_std)
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train_loss_var", loss_var, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train_loss_std", loss_std, on_step=True, on_epoch=True, prog_bar=True)
         self.log(
             "train_nelbo_loss",
             losses["nelbo_loss"].mean(),
@@ -554,14 +684,14 @@ class HyperbolicDLM(L.LightningModule):
         if self.trainer.sanity_checking or self._val_epoch_weight == 0:
             return
         mean_val_loss = self._val_epoch_loss_total / self._val_epoch_weight
-        var_val_loss = self._variance_from_sums(
+        std_val_loss = self._std_from_sums(
             self._val_epoch_loss_total,
             self._val_epoch_loss_sq_total,
             self._val_epoch_weight,
         )
         self.recorder.add("val_loss", step=int(self.global_step), val=mean_val_loss)
-        self.recorder.add("val_loss_var", step=int(self.global_step), val=var_val_loss)
-        self.log("val_loss_var", torch.tensor(var_val_loss, device=self.device, dtype=torch.float64), prog_bar=True)
+        self.recorder.add("val_loss_std", step=int(self.global_step), val=std_val_loss)
+        self.log("val_loss_std", torch.tensor(std_val_loss, device=self.device, dtype=torch.float64), prog_bar=True)
 
     def on_test_start(self):
         self._test_step_offset = max(
@@ -571,6 +701,12 @@ class HyperbolicDLM(L.LightningModule):
         self._test_epoch_loss_total = 0.0
         self._test_epoch_loss_sq_total = 0.0
         self._test_epoch_weight = 0
+        self._test_epoch_wnelbo_total = 0.0
+        self._test_epoch_wnelbo_sq_total = 0.0
+        self._test_epoch_nelbo_total = 0.0
+        self._test_epoch_nelbo_sq_total = 0.0
+        self._test_epoch_ce_total = 0.0
+        self._test_epoch_ce_sq_total = 0.0
         self._test_ts_chunks = []
         self._test_loss_chunks = []
         self._test_nelbo_chunks = []
@@ -586,6 +722,15 @@ class HyperbolicDLM(L.LightningModule):
         self._test_epoch_loss_total += float(loss_values.sum().cpu())
         self._test_epoch_loss_sq_total += float(loss_values.square().sum().cpu())
         self._test_epoch_weight += batch_size
+        wnelbo_values = losses["wnelbo_loss"].detach().to(dtype=torch.float64)
+        self._test_epoch_wnelbo_total += float(wnelbo_values.sum().cpu())
+        self._test_epoch_wnelbo_sq_total += float(wnelbo_values.square().sum().cpu())
+        nelbo_values = losses["nelbo_loss"].detach().to(dtype=torch.float64)
+        self._test_epoch_nelbo_total += float(nelbo_values.sum().cpu())
+        self._test_epoch_nelbo_sq_total += float(nelbo_values.square().sum().cpu())
+        ce_values = losses["ce"].detach().to(dtype=torch.float64)
+        self._test_epoch_ce_total += float(ce_values.sum().cpu())
+        self._test_epoch_ce_sq_total += float(ce_values.square().sum().cpu())
         # Record the per-sample (timestep, loss, weight) distribution.
         self._test_ts_chunks.append(losses["ts"].detach().to(dtype=torch.float32, device="cpu"))
         self._test_loss_chunks.append(loss_values.to(dtype=torch.float32, device="cpu"))
@@ -596,7 +741,7 @@ class HyperbolicDLM(L.LightningModule):
             losses["proposal_weight"].detach().to(dtype=torch.float32, device="cpu")
         )
         self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch_size)
-        self.log("test_nelbo_loss", losses["nelbo_loss"].mean(), on_step=False, on_epoch=True, batch_size=batch_size)
+        self.log("test_nelbo", losses["nelbo_loss"].mean(), on_step=False, on_epoch=True, batch_size=batch_size)
         self.log("test_ce", losses["ce"].mean(), on_step=False, on_epoch=True, batch_size=batch_size)
         return loss
 
@@ -604,22 +749,42 @@ class HyperbolicDLM(L.LightningModule):
         if self._test_epoch_weight == 0:
             return
         mean_test_loss = self._test_epoch_loss_total / self._test_epoch_weight
-        var_test_loss = self._variance_from_sums(
+        std_test_loss = self._std_from_sums(
             self._test_epoch_loss_total,
             self._test_epoch_loss_sq_total,
             self._test_epoch_weight,
-        )
+        ) ** 0.5
         self.recorder.add(
             "test_loss",
             step=self._test_step_offset + 1,
             val=mean_test_loss,
         )
         self.recorder.add(
-            "test_loss_var",
+            "test_loss_std",
             step=self._test_step_offset + 1,
-            val=var_test_loss,
+            val=std_test_loss,
         )
-        self.log("test_loss_var", torch.tensor(var_test_loss, device=self.device, dtype=torch.float64), prog_bar=True)
+        self.log("test_loss_std", torch.tensor(std_test_loss, device=self.device, dtype=torch.float64), prog_bar=True)
+        mean_test_wnelbo = self._test_epoch_wnelbo_total / self._test_epoch_weight
+        std_test_wnelbo = self._std_from_sums(
+            self._test_epoch_wnelbo_total,
+            self._test_epoch_wnelbo_sq_total,
+            self._test_epoch_weight,
+        )
+        std_test_nelbo = self._std_from_sums(
+            self._test_epoch_nelbo_total,
+            self._test_epoch_nelbo_sq_total,
+            self._test_epoch_weight,
+        )
+        std_test_ce = self._std_from_sums(
+            self._test_epoch_ce_total,
+            self._test_epoch_ce_sq_total,
+            self._test_epoch_weight,
+        )
+        self.log("test_wnelbo", torch.tensor(mean_test_wnelbo, device=self.device, dtype=torch.float64))
+        self.log("test_wnelbo_std", torch.tensor(std_test_wnelbo, device=self.device, dtype=torch.float64))
+        self.log("test_nelbo_std", torch.tensor(std_test_nelbo, device=self.device, dtype=torch.float64))
+        self.log("test_ce_std", torch.tensor(std_test_ce, device=self.device, dtype=torch.float64))
         if self._test_ts_chunks:
             self.test_timesteps = torch.cat(self._test_ts_chunks)
             self.test_losses = torch.cat(self._test_loss_chunks)
@@ -692,10 +857,14 @@ def plot_test_loss_vs_timestep(
         ("proposal_density", "proposal density"),
     )
     fig, axes = plt.subplots(len(panels), 1, figsize=(8, 12), sharex=True)
+    x_log = bool(np.any(ts > 0))
     for ax, (key, ylabel) in zip(axes, panels):
-        ax.scatter(ts, series[key], s=4, alpha=0.3)
-        ax.set_xscale("log")
-        ax.set_yscale("log")
+        arr = series[key]
+        ax.scatter(ts, arr, s=4, alpha=0.3)
+        if x_log:
+            ax.set_xscale("log")
+        if bool(np.any(arr > 0)):
+            ax.set_yscale("log")
         ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.3)
     axes[-1].set_xlabel("timestep")
@@ -729,6 +898,10 @@ def name_ext(config):
             ext += "lp"
         elif loss_geometry == LossGeometry.LORENTZ_CARTESIAN:
             ext += "lc"
+        elif loss_geometry == LossGeometry.HORO_CROSS_ENTROPY:
+            ext += "hce"
+        elif loss_geometry == LossGeometry.CROSS_ENTROPY:
+            ext += "ce"
         else:
             raise ValueError(f"config.loss_geometry, {loss_geometry}, is not supported.")
     if postfix is not None:
@@ -800,8 +973,8 @@ def folder(config):
         f"unigram_test2_losses"
         f"_sp{config.max_steps}"
         f"_lr{config.lr}"
-        f"_pt{config.proposal_type}"
-        f"_per{config.proposal_exp_rate}"
+        f"_pt{config.loss_proposal_type}"
+        f"_per{config.loss_proposal_exp_rate}"
         f"_vs{config.vocab_size}"
         f"{name_ext(config)}"
     )
@@ -824,10 +997,13 @@ def main(cfg: DictConfig) -> None:
             "val_size": 4_000,
             "test_size": 4_000000,
             "batch_size": 2048,
-            "max_steps": 2_000,
-            "proposal_type": "exp",
-            "proposal_exp_rate": 1.0,
+            "max_steps": 2_0000,
+            "loss_proposal_type": "exp",
+            "loss_proposal_exp_rate": 1.0,
             "loss_geometry": "poincare_polar",
+            "nelbo_proposal_type": "exp",
+            "nelbo_proposal_exp_rate": 1.0,
+            "nelbo_geometry": "poincare_polar",
             "rotate_emb": False,
             "lr": 1e-5,
             "ps": [0.91, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01],

@@ -173,3 +173,5 @@ cython_debug/
 hyper_dataset/
 hyperbolic_dm/
 hyperdiff_results/
+experiments/
+papers/
