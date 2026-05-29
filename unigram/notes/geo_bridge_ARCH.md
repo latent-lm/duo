@@ -21,7 +21,10 @@ bridge methods**. The sections below are updated to this as-built design; for th
 propagated** to `hyper_bridge.py` (which keeps its Poisson-angle-in-free-kernel
 convention), so geo_bridge is no longer bit-exact with it and the parity test was
 dropped. (Any pre-existing edits to `hyper_bridge.py` in the working tree are
-unrelated to this change.)
+unrelated to this change.) A later refactor **renamed** the kernel class
+`FreeBinaryHyperbolicHeatKernel` → `BinaryHyperbolicHeatKernel` and **relocated**
+`sample_chi`, `sample_chi_old`, and `_geodesic_kernel` onto `GeoUtils` (all
+`@staticmethod`); the sections and symbol map below reflect those names/locations.
 
 ## Scope
 
@@ -29,7 +32,7 @@ In:
 - Two string-tag dataclasses: `Geometry`, `Coordinate`.
 - A `GeoUtils` class holding the boundary-check helpers and the pure coordinate
   converters as `@staticmethod`s.
-- `FreeBinaryHyperbolicHeatKernel(GeoUtils)`: the closed-form `H^2` sampler,
+- `BinaryHyperbolicHeatKernel(GeoUtils)`: the closed-form `H^2` sampler,
   bridge, and geodesic, all `@staticmethod`.
 - Two module-level numeric constants `_LORENTZ_RHO_MAX`, `_SPHERE_T_MAX`.
 
@@ -42,7 +45,7 @@ Out (explicitly NOT in this module — they live only in `hyper_bridge.py`):
   (`poincare_polar_to_lorentz_cartesian`, `poincare_cartesian_to_poincare_polar`,
   `sphere_*`).
 - `_uniform_sphere`, `_check_sphere_t_bound`: present in `GeoUtils` (carried over
-  from the extraction) but **unused** by any `FreeBinaryHyperbolicHeatKernel`
+  from the extraction) but **unused** by any `BinaryHyperbolicHeatKernel`
   method. They are kept verbatim for parity but are dead within this module. Do
   NOT delete (pre-existing, not orphaned by the fix); do NOT wire them in.
 
@@ -59,9 +62,10 @@ Top-to-bottom order (keep the existing order; fixes are surgical):
    `from typing import Optional, Tuple`.
 2. `@dataclass Geometry`, `@dataclass Coordinate`.
 3. Constants `_LORENTZ_RHO_MAX = 20.0`, `_SPHERE_T_MAX = 0.5`.
-4. `class GeoUtils:` — helpers + converters (all `@staticmethod`).
-5. `class FreeBinaryHyperbolicHeatKernel(GeoUtils):` — sampler/bridge/geodesic.
-6. A module-level `_geodesic_kernel` (NEW — inlined; see Open Questions §1).
+4. `class GeoUtils:` — boundary-check helpers, the `sample_chi`/`sample_chi_old`
+   draws, the `_geodesic_kernel`, and the coordinate converters (all `@staticmethod`).
+5. `class BinaryHyperbolicHeatKernel(GeoUtils):` — sampler/bridge/geodesic; inherits
+   the `GeoUtils` helpers (so `sample_chi`/`_geodesic_kernel` resolve through the subclass).
 
 ## Calling-convention rule for GeoUtils (resolves bug #5)
 
@@ -70,12 +74,12 @@ state and take no `self`/`cls`). Cross-references between them use the fully
 qualified form `GeoUtils.<method>(...)`, never a bare name and never `self.`.
 The boundary-check helpers additionally take their args positionally as today.
 
-`FreeBinaryHyperbolicHeatKernel` inherits `GeoUtils`, so inside its methods a
+`BinaryHyperbolicHeatKernel` inherits `GeoUtils`, so inside its methods a
 converter may be called as either `GeoUtils.<m>(...)` or
-`FreeBinaryHyperbolicHeatKernel.<m>(...)`; **standardize on `GeoUtils.<m>(...)`**
-for the converters/helpers and `FreeBinaryHyperbolicHeatKernel.<m>(...)` for the
+`BinaryHyperbolicHeatKernel.<m>(...)`; **standardize on `GeoUtils.<m>(...)`**
+for the converters/helpers and `BinaryHyperbolicHeatKernel.<m>(...)` for the
 kernel/bridge methods (matches how the reference qualifies its own static
-methods, e.g. `FreeBinaryHyperbolicHeatKernel.sample_chi`).
+methods, e.g. `BinaryHyperbolicHeatKernel.sample_chi`).
 
 Rationale: the current file is inconsistent — `binary_hyperbolic_polar_to_lorentz_cartesian`
 has `@staticmethod` but the sibling converters do not, and several callers use
@@ -194,7 +198,7 @@ def binary_hyperbolic_polar_to_lorentz_cartesian(rhos: torch.FloatTensor, thetas
 - **Invariant:** `<z,z>_L == -1` i.e. `-z0^2 + z1^2 + z2^2 == -1` (exact up to
   float cancellation; the caller gates large rho via `_check_lorentz_rho_bound`).
 - This converter does NOT itself call `_check_lorentz_rho_bound`; callers do.
-- Reference: `FreeBinaryHyperbolicHeatKernel.poincare_polar_to_lorentz_cartesian`
+- Reference: `BinaryHyperbolicHeatKernel.poincare_polar_to_lorentz_cartesian`
   (hyper_bridge L439). Body is identical and ALREADY correct in geo_bridge.
   (The simple `stack` form, NOT the rescaled module-level `d>=3` form at L160.)
 
@@ -268,12 +272,15 @@ def lorentz_cartesian_to_poincare_cartesian(z: torch.Tensor) -> torch.Tensor
   Use this body (parameter name `z` per the geo_bridge stub).
 - Used by `geodesic` to return Poincare output when `cartesian_model == POINCARE`.
 
-## FreeBinaryHyperbolicHeatKernel methods
+## BinaryHyperbolicHeatKernel methods
 
-`class FreeBinaryHyperbolicHeatKernel(GeoUtils):` — all methods `@staticmethod`,
-all `@torch.no_grad()` (except `sample_chi`/`sample_chi_old`, which lack the
-decorator in the reference; keep that as-is). `ts` dtype is the working dtype
-(typically `torch.float64`); outputs preserve it.
+`class BinaryHyperbolicHeatKernel(GeoUtils):` — all methods `@staticmethod`,
+all `@torch.no_grad()`. `ts` dtype is the working dtype (typically
+`torch.float64`); outputs preserve it.
+
+> **Relocation note (refactor):** `sample_chi` and `sample_chi_old` now live on
+> **`GeoUtils`** (next to `_geodesic_kernel`), not on this class. They are
+> documented just below for continuity; the kernel reaches them by inheritance.
 
 ### `sample_chi`
 ```python
@@ -282,7 +289,7 @@ def sample_chi(ns: torch.Tensor, dtype: torch.dtype = torch.float64) -> torch.Te
 ```
 - `ns`: `(B,)` int degrees of freedom. Returns `(B,)` chi samples via
   `chi^2(n) ~ Gamma(n/2, rate=0.5)`, `.sqrt()`. Invariant: output `>= 0`.
-- Reference: `FreeBinaryHyperbolicHeatKernel.sample_chi` (hyper_bridge L467).
+- Reference: `BinaryHyperbolicHeatKernel.sample_chi` (hyper_bridge L467).
   Identical and correct.
 
 ### `sample_chi_old`
@@ -308,7 +315,7 @@ def binary_free_hyperbolic_heat_kernel(ts: torch.FloatTensor) -> Tuple[torch.Flo
 - **As-built body (UNIFORM angle — diverges from the reference):**
   ```python
   ns = torch.poisson(ts / 8).to(torch.int64)
-  ss = ts.sqrt() * FreeBinaryHyperbolicHeatKernel.sample_chi(2 * ns + 3, ts.dtype)
+  ss = ts.sqrt() * BinaryHyperbolicHeatKernel.sample_chi(2 * ns + 3, ts.dtype)
   vs = torch.rand_like(ts)
   rhos = torch.acosh(vs.square() + (1 - vs.square()) * torch.cosh(ss))
   us = torch.rand_like(ts)
@@ -341,14 +348,14 @@ def binary_free_poincare_heat_kernel(ts: torch.FloatTensor, output_coord: Option
   `CARTESIAN` → `(B, 2)` Poincare-disk `z` with `||z|| < 1`.
 - **Intended body:**
   ```python
-  rhos, thetas = FreeBinaryHyperbolicHeatKernel.binary_free_hyperbolic_heat_kernel(ts=ts)
+  rhos, thetas = BinaryHyperbolicHeatKernel.binary_free_hyperbolic_heat_kernel(ts=ts)
   if output_coord == Coordinate.CARTESIAN:
       return GeoUtils.binary_hyperbolic_polar_to_poincare_cartesian(rhos, thetas)
   return rhos, thetas
   ```
 - **Three bugs to fix (geo_bridge L335–338):**
   1. L335 bare `binary_free_hyperbolic_heat_kernel(ts=ts)` → qualify as
-     `FreeBinaryHyperbolicHeatKernel.binary_free_hyperbolic_heat_kernel(ts=ts)`.
+     `BinaryHyperbolicHeatKernel.binary_free_hyperbolic_heat_kernel(ts=ts)`.
   2. L337 bare `binary_hyperbolic_polar_to_poincare_cartesian(ps, thetas)` →
      qualify as `GeoUtils.binary_hyperbolic_polar_to_poincare_cartesian(rhos, thetas)`.
   3. Undefined var `ps` (twice, L337 + L338) → must be `rhos`.
@@ -371,7 +378,7 @@ def binary_free_lorentz_heat_kernel(ts: torch.FloatTensor, output_coord: Optiona
   `max(rho) > _LORENTZ_RHO_MAX`.
 - **Intended body:**
   ```python
-  rhos, thetas = FreeBinaryHyperbolicHeatKernel.binary_free_poincare_heat_kernel(
+  rhos, thetas = BinaryHyperbolicHeatKernel.binary_free_poincare_heat_kernel(
       ts=ts, output_coord=Coordinate.HYPERBOLIC_POLAR
   )
   if output_coord == Coordinate.HYPERBOLIC_POLAR:
@@ -524,9 +531,9 @@ def geodesic(
      param. (The reference's `geodesic` takes Lorentz-only `src`/`dest` and has
      no `cartesian_model`; geo_bridge intentionally generalizes to accept
      Poincare cartesian inputs — this is the documented added capability.)
-  5. L526 `_geodesic_kernel(x_amb, y_amb, t, kappa=-1)` → call the module-level
-     inlined `_geodesic_kernel` (see Open Questions §1); name `interpolate`
-     (geo_bridge's local) is fine, keep it.
+  5. L526 `_geodesic_kernel(x_amb, y_amb, t, kappa=-1)` → call the inlined
+     `GeoUtils._geodesic_kernel` (relocated onto `GeoUtils`; see Open Questions §1);
+     name `interpolate` (geo_bridge's local) is fine, keep it.
   6. **Return block (geo_bridge L546–553, the user's chart-aware edit — adopt
      and fix its bugs):**
      ```python
@@ -554,14 +561,15 @@ def geodesic(
        The interpolated ambient point is `(B, 3)`, satisfying the `(..., 3)` contract.
 - **Invariants:** for Lorentz output, `<gamma,gamma>_L == -1`; `t == 0` →
   src (on-manifold), `t == 1` → dest; constant geodesic speed.
-- Reference: `FreeBinaryHyperbolicHeatKernel.geodesic` (hyper_bridge L642) for
+- Reference: `BinaryHyperbolicHeatKernel.geodesic` (hyper_bridge L642) for
   the polar-input + Lorentz-cartesian-input + `_geodesic_kernel` structure;
   geo_bridge adds the `cartesian_model` Poincare-lift on top.
 
-## Module-level private helper (NEW — inlined)
+## GeoUtils geodesic helper (inlined, self-contained)
 
-### `_geodesic_kernel`  (resolves Open Questions §1)
+### `GeoUtils._geodesic_kernel`  (resolves Open Questions §1)
 ```python
+@staticmethod
 @torch.no_grad()
 def _geodesic_kernel(x: torch.Tensor, y: torch.Tensor, t, kappa: int) -> torch.Tensor
 ```
@@ -572,15 +580,16 @@ def _geodesic_kernel(x: torch.Tensor, y: torch.Tensor, t, kappa: int) -> torch.T
   distance form `cosh d - 1 = <x-y, x-y>_L / 2` and a small-`d` Euclidean
   fallback (`d < 1e-6`).
 - **DECISION: inline a verbatim copy** of `_geodesic_kernel` (hyper_bridge
-  L350–390) as a module-level function in `geo_bridge.py`, NOT
+  L350–390) as a **`GeoUtils` `@staticmethod`** in `geo_bridge.py`, NOT
   `from hyper_bridge import _geodesic_kernel`.
   Rationale: geo_bridge is deliberately self-contained — it re-implements every
   converter and bound-check internally rather than importing them. Importing one
   private helper from `hyper_bridge` would break that property and couple the two
   modules at a single arbitrary point; a ~40-line verbatim copy is the
-  consistent, minimal-coupling choice. Mark it module-level (not a `GeoUtils`
-  method) to match the reference's placement and because `geodesic` calls it as a
-  bare module function.
+  consistent, minimal-coupling choice. (Refactor: relocated from a bare
+  module-level function into `GeoUtils` so all geometry helpers share one home;
+  `geodesic` now calls it as `BinaryHyperbolicHeatKernel._geodesic_kernel(...)`,
+  resolved through the subclass.)
 
 ## Coordinate / invariant cheat-sheet
 
@@ -604,19 +613,19 @@ def _geodesic_kernel(x: torch.Tensor, y: torch.Tensor, t, kappa: int) -> torch.T
 | `GeoUtils._check_sphere_t_bound` | `_check_sphere_t_bound` (L108) | moved into class; UNUSED here |
 | `GeoUtils._binary_polar_direction` | `_polar_direction` (L126) | `d == 2` specialization; `(thetas)` not `(rhos, thetas_or_u)` |
 | `GeoUtils.binary_hyperbolic_polar_to_poincare_cartesian` | `poincare_polar_to_poincare_cartesian` (L143) | `d == 2` only; add missing `@staticmethod` |
-| `GeoUtils.binary_hyperbolic_polar_to_lorentz_cartesian` | `FreeBinaryHyperbolicHeatKernel.poincare_polar_to_lorentz_cartesian` (L439) | identical; already correct |
+| `GeoUtils.binary_hyperbolic_polar_to_lorentz_cartesian` | `BinaryHyperbolicHeatKernel.poincare_polar_to_lorentz_cartesian` (L439) | identical; already correct |
 | `GeoUtils.binary_lorentz_cartesian_to_hyperbolic_polar` | `lorentz_cartesian_to_poincare_polar` (L234) | `d == 2` path; 3 bugs to fix |
 | `GeoUtils.poincare_cartesian_to_lorentz_cartesian` | `poincare_cartesian_to_lorentz_cartesian` (L212) | identical; add `@staticmethod` |
 | `GeoUtils.lorentz_cartesian_to_poincare_cartesian` (NEW, user stub) | `lorentz_cartesian_to_poincare_cartesian` (L266) | implement `z[1:]/(1+z[0])`; fix docstring; add `@staticmethod` |
-| `FreeBinaryHyperbolicHeatKernel.sample_chi` | `…sample_chi` (L467) | identical |
-| `FreeBinaryHyperbolicHeatKernel.sample_chi_old` | `…sample_chi_old` (L489) | identical |
-| `FreeBinaryHyperbolicHeatKernel.binary_free_hyperbolic_heat_kernel` | polar branch of `binary_free_poincare_heat_kernel` (L526–531) | split out as own method; **angle revised to UNIFORM** (reference uses Poisson) — intentional divergence |
-| `FreeBinaryHyperbolicHeatKernel.binary_free_poincare_heat_kernel` | `…binary_free_poincare_heat_kernel` (L511) | delegates polar to new method; fix `ps`/bare names |
-| `FreeBinaryHyperbolicHeatKernel.binary_free_lorentz_heat_kernel` | `…binary_free_lorentz_heat_kernel` (L538) | fix bare-name calls |
-| `FreeBinaryHyperbolicHeatKernel.binary_poincare_bridge` | `…binary_poincare_bridge` (L566) | applies the Poisson-kernel warp internally (reference inherits it from its free kernel); same output distribution |
-| `FreeBinaryHyperbolicHeatKernel.binary_lorentz_bridge` | `…binary_lorentz_bridge` (L604) | fix bare-name calls |
-| `FreeBinaryHyperbolicHeatKernel.geodesic` | `…geodesic` (L642) | + `cartesian_model` Poincare lift on input AND chart-aware output; fix src/dest names, dest symmetry, `Geometry.Lorentz/Poincare` casing, bare calls |
-| `_geodesic_kernel` (module-level, NEW) | `_geodesic_kernel` (L350) | inlined verbatim copy |
+| `GeoUtils.sample_chi` | `…sample_chi` (L467) | identical; relocated onto `GeoUtils` |
+| `GeoUtils.sample_chi_old` | `…sample_chi_old` (L489) | identical; relocated onto `GeoUtils` |
+| `BinaryHyperbolicHeatKernel.binary_free_hyperbolic_heat_kernel` | polar branch of `binary_free_poincare_heat_kernel` (L526–531) | split out as own method; **angle revised to UNIFORM** (reference uses Poisson) — intentional divergence |
+| `BinaryHyperbolicHeatKernel.binary_free_poincare_heat_kernel` | `…binary_free_poincare_heat_kernel` (L511) | delegates polar to new method; fix `ps`/bare names |
+| `BinaryHyperbolicHeatKernel.binary_free_lorentz_heat_kernel` | `…binary_free_lorentz_heat_kernel` (L538) | fix bare-name calls |
+| `BinaryHyperbolicHeatKernel.binary_poincare_bridge` | `…binary_poincare_bridge` (L566) | applies the Poisson-kernel warp internally (reference inherits it from its free kernel); same output distribution |
+| `BinaryHyperbolicHeatKernel.binary_lorentz_bridge` | `…binary_lorentz_bridge` (L604) | fix bare-name calls |
+| `BinaryHyperbolicHeatKernel.geodesic` | `…geodesic` (L642) | + `cartesian_model` Poincare lift on input AND chart-aware output; fix src/dest names, dest symmetry, `Geometry.Lorentz/Poincare` casing, bare calls |
+| `GeoUtils._geodesic_kernel` | `_geodesic_kernel` (L350) | inlined verbatim copy; relocated onto `GeoUtils` as a `@staticmethod` |
 
 ## Edge cases & invariants (module-wide)
 
@@ -638,9 +647,10 @@ def _geodesic_kernel(x: torch.Tensor, y: torch.Tensor, t, kappa: int) -> torch.T
 
 ## Open questions (all resolved with recommendations)
 
-1. **`_geodesic_kernel` placement** → RESOLVED: inline a verbatim module-level
-   copy from hyper_bridge L350; do NOT import. (Keeps geo_bridge self-contained,
-   consistent with how every other helper was re-implemented.)
+1. **`_geodesic_kernel` placement** → RESOLVED: inline a verbatim copy from
+   hyper_bridge L350; do NOT import. (Keeps geo_bridge self-contained, consistent
+   with how every other helper was re-implemented.) Refactor: it now lives on
+   `GeoUtils` as a `@staticmethod` rather than as a bare module-level function.
 2. **`geodesic` parameter naming** → RESOLVED: keep signature names
    `src_cartesian`/`dest_cartesian`/`src_radial`/… ; fix the body's stray
    `src`/`dest` to use them. Minimal churn; the guards already use the long names.

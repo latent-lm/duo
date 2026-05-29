@@ -2,7 +2,7 @@
 
 This module is the self-contained `H^2` slice of the heat-kernel machinery:
 
-- [`FreeBinaryHyperbolicHeatKernel`]: the closed-form `d == 2` free heat
+- [`BinaryHyperbolicHeatKernel`]: the closed-form `d == 2` free heat
   kernel, its target-conditioned bridge, and the constant-speed geodesic.
 - [`GeoUtils`]: pure coordinate converters between Poincare-disk and
   Lorentz-Cartesian representations plus the numeric boundary guards; no
@@ -110,7 +110,104 @@ class GeoUtils:
             )
 
     # ---------------------------------------------------------------------------
-    # Module-level coordinate converters
+    # Geodesic helper
+    # ---------------------------------------------------------------------------
+
+    @staticmethod
+    @torch.no_grad()
+    def _geodesic_kernel(
+        x: torch.Tensor, y: torch.Tensor, t, kappa: int
+    ) -> torch.Tensor:
+        """Constant-speed geodesic from x to y at fraction t.
+
+        kappa = -1: Lorentz lerp on hyperboloid.  d_H = arccosh(-<x, y>_L).
+        kappa = +1: SLERP on sphere.              d_S = arccos(<x, y>).
+
+        The intrinsic distance is computed from the differential form
+        `cosh(d_H) - 1 = <x - y, x - y>_L / 2` (hyperbolic) and
+        `1 - cos(d_S) = ||x - y||^2 / 2`         (spherical), which avoids the
+        catastrophic cancellation that would otherwise plague the inner product at
+        high dimensions.
+        """
+        diff = x - y
+        if kappa == -1:
+            diff_inner = -diff[..., 0] * diff[..., 0] + (diff[..., 1:] * diff[..., 1:]).sum(-1)
+            cosh_d_minus_one = (diff_inner / 2.0).clamp_min(0.0)
+            d = torch.acosh(1.0 + cosh_d_minus_one)
+            f = torch.sinh
+        elif kappa == 1:
+            diff_sq = (diff * diff).sum(-1)
+            one_minus_cos = (diff_sq / 2.0).clamp(0.0, 2.0)
+            d = torch.acos((1.0 - one_minus_cos).clamp(-1.0, 1.0))
+            f = torch.sin
+        else:
+            raise ValueError(f"kappa must be -1 or +1; got {kappa}")
+
+        if not torch.is_tensor(t):
+            t = torch.tensor(t, dtype=x.dtype, device=x.device)
+        else:
+            t = t.to(dtype=x.dtype, device=x.device)
+
+        euclid = (1.0 - t) * x + t * y
+        small = d < 1e-6
+        tiny = torch.finfo(x.dtype).tiny
+        fd = f(d).clamp_min(tiny)
+        coef_x = f((1.0 - t) * d) / fd
+        coef_y = f(t * d) / fd
+        gamma = coef_x.unsqueeze(-1) * x + coef_y.unsqueeze(-1) * y
+        return torch.where(small.unsqueeze(-1), euclid, gamma)
+
+    # ---------------------------------------------------------------------------
+    # Random-distribution generators
+    # ---------------------------------------------------------------------------
+
+    @staticmethod
+    def sample_chi(ns: torch.Tensor, dtype: torch.dtype = torch.float64) -> torch.Tensor:
+        """Sample `chi(n)` via the Gamma identity `chi^2(n) ~ Gamma(n/2, scale=2)`.
+
+        Direct Gamma sampling avoids materializing `sum(ns)` standard normals,
+        which is critical when `ns` carries large counts (e.g. via Poisson rates
+        at large `t`).
+
+        Args:
+            ns (`torch.Tensor` of shape `(batch_size,)`):
+                Integer degrees of freedom.
+            dtype (`torch.dtype`, *optional*, defaults to `torch.float64`):
+                Floating-point precision of the draw.
+
+        Returns:
+            `torch.Tensor` of shape `(batch_size,)`: chi samples.
+        """
+        concentration = ns.to(dtype) / 2
+        rate = torch.tensor(0.5, device=ns.device, dtype=dtype)
+        chi2 = torch.distributions.Gamma(concentration, rate).sample()
+        return chi2.sqrt()
+
+    @staticmethod
+    def sample_chi_old(ns: torch.Tensor, dtype: torch.dtype = torch.float64) -> torch.Tensor:
+        """Legacy `chi(n)` sampler via summed squared normals.
+
+        Retained for reference and parity checks against [`sample_chi`]; not used
+        on the hot path because it allocates `sum(ns)` standard normals.
+
+        Args:
+            ns (`torch.Tensor`):
+                Integer degrees of freedom, any shape.
+            dtype (`torch.dtype`, *optional*, defaults to `torch.float64`):
+                Floating-point precision of the draw.
+
+        Returns:
+            `torch.Tensor` of the same shape as `ns`: chi samples.
+        """
+        nshape = ns.shape
+        ns = ns.reshape(-1)
+        M = ns.sum().item()
+        x = torch.randn(M, device=ns.device, dtype=dtype).square()
+        chi2 = torch.segment_reduce(x,'sum',lengths=ns)
+        return chi2.sqrt().reshape(nshape)
+
+    # ---------------------------------------------------------------------------
+    # Coordinate converters
     # ---------------------------------------------------------------------------
 
     @staticmethod
@@ -252,7 +349,7 @@ class GeoUtils:
         denom = (1.0 + t).unsqueeze(-1).clamp_min(torch.finfo(z.dtype).tiny)
         return spatial / denom
 
-class FreeBinaryHyperbolicHeatKernel(GeoUtils):
+class BinaryHyperbolicHeatKernel(GeoUtils):
     """Closed-form free hyperbolic heat kernel and bridge on `H^2` (d=2).
 
     Implements Gruet's series representation specialized to the disk: a Poisson
@@ -269,51 +366,6 @@ class FreeBinaryHyperbolicHeatKernel(GeoUtils):
     `output_coord` in `{Coordinate.HYPERBOLIC_POLAR, Coordinate.CARTESIAN}` selecting the
     return geometry.
     """
-
-    @staticmethod
-    def sample_chi(ns: torch.Tensor, dtype: torch.dtype = torch.float64) -> torch.Tensor:
-        """Sample `chi(n)` via the Gamma identity `chi^2(n) ~ Gamma(n/2, scale=2)`.
-
-        Direct Gamma sampling avoids materializing `sum(ns)` standard normals,
-        which is critical when `ns` carries large counts (e.g. via Poisson rates
-        at large `t`).
-
-        Args:
-            ns (`torch.Tensor` of shape `(batch_size,)`):
-                Integer degrees of freedom.
-            dtype (`torch.dtype`, *optional*, defaults to `torch.float64`):
-                Floating-point precision of the draw.
-
-        Returns:
-            `torch.Tensor` of shape `(batch_size,)`: chi samples.
-        """
-        concentration = ns.to(dtype) / 2
-        rate = torch.tensor(0.5, device=ns.device, dtype=dtype)
-        chi2 = torch.distributions.Gamma(concentration, rate).sample()
-        return chi2.sqrt()
-
-    @staticmethod
-    def sample_chi_old(ns: torch.Tensor, dtype: torch.dtype = torch.float64) -> torch.Tensor:
-        """Legacy `chi(n)` sampler via summed squared normals.
-
-        Retained for reference and parity checks against [`sample_chi`]; not used
-        on the hot path because it allocates `sum(ns)` standard normals.
-
-        Args:
-            ns (`torch.Tensor`):
-                Integer degrees of freedom, any shape.
-            dtype (`torch.dtype`, *optional*, defaults to `torch.float64`):
-                Floating-point precision of the draw.
-
-        Returns:
-            `torch.Tensor` of the same shape as `ns`: chi samples.
-        """
-        nshape = ns.shape
-        ns = ns.reshape(-1)
-        M = ns.sum().item()
-        x = torch.randn(M, device=ns.device, dtype=dtype).square()
-        chi2 = torch.segment_reduce(x,'sum',lengths=ns)
-        return chi2.sqrt().reshape(nshape)
 
     @staticmethod
     @torch.no_grad()
@@ -333,7 +385,7 @@ class FreeBinaryHyperbolicHeatKernel(GeoUtils):
             shape `(batch_size,)`; `rhos >= 0` and `thetas` uniform on `[-pi, pi)`.
         """
         ns = torch.poisson(ts/8).to(torch.int64)
-        ss = ts.sqrt() * FreeBinaryHyperbolicHeatKernel.sample_chi(2*ns+3, ts.dtype)
+        ss = ts.sqrt() * BinaryHyperbolicHeatKernel.sample_chi(2*ns+3, ts.dtype)
         vs = torch.rand_like(ts)
         rhos = torch.acosh(vs.square() + (1-vs.square())*torch.cosh(ss))
         us = torch.rand_like(ts)
@@ -361,7 +413,7 @@ class FreeBinaryHyperbolicHeatKernel(GeoUtils):
             shape `(batch_size,)`. CARTESIAN: `torch.FloatTensor` of shape
             `(batch_size, 2)`, the Poincare-disk point `z` with `||z|| < 1`.
         """
-        rhos, thetas = FreeBinaryHyperbolicHeatKernel.binary_free_hyperbolic_heat_kernel(ts=ts)
+        rhos, thetas = BinaryHyperbolicHeatKernel.binary_free_hyperbolic_heat_kernel(ts=ts)
         if output_coord == Coordinate.CARTESIAN:
             return GeoUtils.binary_hyperbolic_polar_to_poincare_cartesian(rhos, thetas)
         return rhos, thetas
@@ -386,7 +438,7 @@ class FreeBinaryHyperbolicHeatKernel(GeoUtils):
             CARTESIAN: `torch.FloatTensor` of shape `(batch_size, 3)`. Raises
             `ValueError` if `max(rho) > _LORENTZ_RHO_MAX`.
         """
-        rhos, thetas = FreeBinaryHyperbolicHeatKernel.binary_free_poincare_heat_kernel(
+        rhos, thetas = BinaryHyperbolicHeatKernel.binary_free_poincare_heat_kernel(
             ts=ts, output_coord=Coordinate.HYPERBOLIC_POLAR
         )
         if output_coord == Coordinate.HYPERBOLIC_POLAR:
@@ -426,7 +478,7 @@ class FreeBinaryHyperbolicHeatKernel(GeoUtils):
                 `(-pi, pi]`); downstream consumers use it only via `cos`/`sin`.
             CARTESIAN: Poincare-disk coordinates of shape `(batch_size, 2)`.
         """
-        rhos, thetas = FreeBinaryHyperbolicHeatKernel.binary_free_poincare_heat_kernel(
+        rhos, thetas = BinaryHyperbolicHeatKernel.binary_free_poincare_heat_kernel(
             ts=ts, output_coord=Coordinate.HYPERBOLIC_POLAR
         )
         # reshape the uniform free angle into the Poisson-kernel angle (concentration
@@ -466,7 +518,7 @@ class FreeBinaryHyperbolicHeatKernel(GeoUtils):
             CARTESIAN: Lorentz-Cartesian coords of shape `(batch_size, 3)`. Raises
             `ValueError` if `max(rho) > _LORENTZ_RHO_MAX`.
         """
-        rhos, thetas = FreeBinaryHyperbolicHeatKernel.binary_poincare_bridge(
+        rhos, thetas = BinaryHyperbolicHeatKernel.binary_poincare_bridge(
             ts=ts,
             targets=targets,
             word_embedding=word_embedding,
@@ -578,7 +630,7 @@ class FreeBinaryHyperbolicHeatKernel(GeoUtils):
             GeoUtils._check_lorentz_rho_bound(dest_radial, d=2)
             y_amb = GeoUtils.binary_hyperbolic_polar_to_lorentz_cartesian(rhos=dest_radial, thetas=dest_angular)
 
-        interpolate = _geodesic_kernel(x_amb, y_amb, t, kappa=-1)
+        interpolate = BinaryHyperbolicHeatKernel._geodesic_kernel(x_amb, y_amb, t, kappa=-1)
 
         if output_coord == Coordinate.CARTESIAN:
             if cartesian_model == Geometry.LORENTZ:
@@ -588,50 +640,3 @@ class FreeBinaryHyperbolicHeatKernel(GeoUtils):
             else:
                 raise ValueError(f"cartesian_model, {cartesian_model}, is not supported, only support ({Geometry.LORENTZ}, {Geometry.POINCARE}).")
         return GeoUtils.binary_lorentz_cartesian_to_hyperbolic_polar(interpolate)
-
-# ---------------------------------------------------------------------------
-# Module-level private helpers
-# ---------------------------------------------------------------------------
-
-@torch.no_grad()
-def _geodesic_kernel(
-    x: torch.Tensor, y: torch.Tensor, t, kappa: int
-) -> torch.Tensor:
-    """Constant-speed geodesic from x to y at fraction t.
-
-    kappa = -1: Lorentz lerp on hyperboloid.  d_H = arccosh(-<x, y>_L).
-    kappa = +1: SLERP on sphere.              d_S = arccos(<x, y>).
-
-    The intrinsic distance is computed from the differential form
-    `cosh(d_H) - 1 = <x - y, x - y>_L / 2` (hyperbolic) and
-    `1 - cos(d_S) = ||x - y||^2 / 2`         (spherical), which avoids the
-    catastrophic cancellation that would otherwise plague the inner product at
-    high dimensions.
-    """
-    diff = x - y
-    if kappa == -1:
-        diff_inner = -diff[..., 0] * diff[..., 0] + (diff[..., 1:] * diff[..., 1:]).sum(-1)
-        cosh_d_minus_one = (diff_inner / 2.0).clamp_min(0.0)
-        d = torch.acosh(1.0 + cosh_d_minus_one)
-        f = torch.sinh
-    elif kappa == 1:
-        diff_sq = (diff * diff).sum(-1)
-        one_minus_cos = (diff_sq / 2.0).clamp(0.0, 2.0)
-        d = torch.acos((1.0 - one_minus_cos).clamp(-1.0, 1.0))
-        f = torch.sin
-    else:
-        raise ValueError(f"kappa must be -1 or +1; got {kappa}")
-
-    if not torch.is_tensor(t):
-        t = torch.tensor(t, dtype=x.dtype, device=x.device)
-    else:
-        t = t.to(dtype=x.dtype, device=x.device)
-
-    euclid = (1.0 - t) * x + t * y
-    small = d < 1e-6
-    tiny = torch.finfo(x.dtype).tiny
-    fd = f(d).clamp_min(tiny)
-    coef_x = f((1.0 - t) * d) / fd
-    coef_y = f(t * d) / fd
-    gamma = coef_x.unsqueeze(-1) * x + coef_y.unsqueeze(-1) * y
-    return torch.where(small.unsqueeze(-1), euclid, gamma)

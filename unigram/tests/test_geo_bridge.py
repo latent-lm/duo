@@ -24,7 +24,7 @@ import torch
 
 from geo_bridge import (
     Coordinate,
-    FreeBinaryHyperbolicHeatKernel as HK,
+    BinaryHyperbolicHeatKernel as HK,
     GeoUtils,
     Geometry,
 )
@@ -549,3 +549,29 @@ def test_binary_poincare_bridge_angle_follows_poisson_kernel():
     emp = float(torch.cos(thetas - math.pi / 2).mean())
     expected = float(torch.tanh(rhos / 2).mean())
     assert abs(emp - expected) < 0.02
+
+
+# ===========================================================================
+# 9. Refactor: relocated helpers live on GeoUtils as @staticmethods.
+# ===========================================================================
+
+
+def test_relocated_helpers_are_geoutils_staticmethods():
+    # The refactor moved sample_chi / sample_chi_old / _geodesic_kernel onto
+    # GeoUtils. They must be @staticmethods (every GeoUtils member is) -- this also
+    # guards against _geodesic_kernel regressing to a plain method that only works
+    # via class-qualified access.
+    for name in ("sample_chi", "sample_chi_old", "_geodesic_kernel"):
+        assert isinstance(
+            GeoUtils.__dict__[name], staticmethod
+        ), f"GeoUtils.{name} must be a @staticmethod"
+
+
+def test_geoutils_sample_chi_correct_and_positive():
+    # sample_chi(k) draws chi(k); chi^2(k) has mean k. Pins the relocated sampler.
+    torch.manual_seed(0)
+    ns = torch.full((200000,), 3, dtype=torch.long)
+    chi = GeoUtils.sample_chi(ns, DTYPE)
+    assert chi.shape == ns.shape
+    assert torch.all(chi >= 0) and torch.all(torch.isfinite(chi))
+    assert abs(float((chi**2).mean()) - 3.0) < 0.05  # E[chi^2(3)] = 3
