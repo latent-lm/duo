@@ -975,6 +975,8 @@ def folder(config):
         f"_lr{config.lr}"
         f"_pt{config.loss_proposal_type}"
         f"_per{config.loss_proposal_exp_rate}"
+        f"_hT{config.hyper_T}"
+        f"_hdt{config.hyper_dt}"
         f"_vs{config.vocab_size}"
         f"{name_ext(config)}"
     )
