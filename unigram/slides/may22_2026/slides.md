@@ -182,318 +182,114 @@ $$
 
 ---
 
-## Proposal Distribution
+# Trained Model: Cross-Entropy vs Poincaré Loss
 
-```python
-def proposal(
-    proposal_type: str,
-    shape,
-    device,
-    dtype,
-    unif_min: float,
-    unif_max: float,
-    exp_rate: float,
-):
-    proposal_type = proposal_type.lower()
-    interval = float(unif_max - unif_min)
-    if interval < 0:
-        raise ValueError("proposal requires unif_max >= unif_min")
-
-    if proposal_type == HyperBridge.PROPOSAL_UNIF_NAME:
-        ts = unif_min + interval * torch.rand(shape, device=device, dtype=dtype)
-        weights = torch.full_like(ts, interval)
-        return ts, weights
-    elif proposal_type == HyperBridge.PROPOSAL_EXP_NAME:
-        if exp_rate <= 0:
-            raise ValueError("proposal_exp_rate must be > 0")
-        if interval == 0:
-            ts = torch.zeros(shape, device=device, dtype=dtype)
-            return ts, torch.zeros_like(ts)
-        u = torch.rand(shape, device=device, dtype=dtype).clamp(
-            min=1e-12,
-            max=1 - 1e-12,
-        )
-        ts = - torch.log1p(-u) / exp_rate
-        density = exp_rate * torch.exp(-exp_rate * ts)
-        return ts, density.reciprocal()
-    else:
-        raise NotImplementedError(f"proposal_type={proposal_type} is not implemented.")
-```
+### Which training loss learns the bridge?
 
 ---
 
-## Poincare Disk - Polar Bridge ELBO Loss
+## Training Model Setting Up
 
-```python
-def binary_bridge_loss_polar(logits, targets, rhos, thetas):
-        (N,) = targets.shape
-        (N,V) = logits.shape
-        device = rhos.device
-        assert(rhos.shape == (N,))
-        assert(thetas.shape == (N,))
-        assert(targets.dtype == torch.int64)
-        assert(rhos.dtype == torch.float64)
-        assert(thetas.dtype == torch.float64)
-        # construct phis
-        phis = (
-            torch.arange(V, device=device, dtype=torch.float64) + 0.5
-        ) * (2 * torch.pi / V)
-        # first, we get the horosphere distances
-        alphas = thetas[:,None] - phis[None,:]  # angular offsets between z and v
-        cos_alphas = alphas.cos()
-        sin_alphas = alphas.sin()
-        log_two = torch.log(torch.tensor(2.0, device=device, dtype=torch.float64))
-        horosphere_dists = log_two - torch.logaddexp((1 - cos_alphas).log() + rhos[:,None], (1 + cos_alphas).log() - rhos[:,None])
-        # remake mu and subtract the target
-        mu = (horosphere_dists + logits.to(torch.float64)).softmax(-1)
-        mu = mu - torch.nn.functional.one_hot(targets,V).to(torch.float64)
-        # next, we transform the angles alpha after motion by rho
-        betas = torch.atan2(sin_alphas, rhos.cosh()[:,None] * cos_alphas - rhos.sinh()[:,None])
-        cos_errors = (betas.cos() * mu).sum(-1)
-        sin_errors = (betas.sin() * mu).sum(-1)
-        return (cos_errors.square() + sin_errors.square())/2
-```
+**which loss should we train with? CE or ELBO**
 
+- Vocab size: 10  |  Data dist: $[0.91,\ 0.01\times 9]$  |  entropy $\approx 0.500$
+- Proposal: 
+  - **stratified exponential**, rate $\lambda \in \{0.01, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 2.0\}$
+  - **uniform** $[0.01, 10]$
+- Bridge horizon: `hyper_T` $= 1000$, `hyper_dt` $= 0.01$
 
 ---
 
-## Poincare Disk - Cartesian Bridge ELBO Loss
+## Training Model Setting Up
 
-```python
-@staticmethod
-def _cartesian_geometry(rhos, thetas, V):
-    """Returns (z, v, diff, sq, one_minus_zz, h) used by every variant."""
-    z = polar_to_cart(rhos, thetas)                                  # (N, 2)
-    v = vocab_points(V, rhos.device, rhos.dtype)                     # (V, 2)
-    diff = v - z.unsqueeze(-2)                                       # (N, V, 2)
-    sq   = diff.square().sum(-1)                                     # (N, V)
-    one_minus_zz = 1 - z.square().sum(-1, keepdim=True)              # (N, 1)
-    h    = (one_minus_zz / sq).log()                                 # (N, V)
-    return z, v, diff, sq, one_minus_zz, h
-
-@staticmethod
-def _expected_radial(mu, diff, sq):
-    """E_{v ~ mu}[ (v - z) / ||v - z||^2 ]  =  sum_v mu_v (v-z)/||v-z||^2."""
-    return (mu / sq).unsqueeze(-1).mul(diff).sum(-2)                 # (N, 2)
-
-@staticmethod
-def _cartesian_squared_residual(target, model, one_minus_zz, d=2):
-    """L = (d-1)^2 / 2 * (1 - ||z||^2)^2 * ||target - model||^2."""
-    residual = target - model                                        # (N, 2)
-    return (d - 1) ** 2 / 2 * one_minus_zz.squeeze(-1).square() \
-            * residual.square().sum(-1)
-
-@staticmethod
-def binary_bridge_loss_cartesian(logits, targets, rhos, thetas):
-    V, d = logits.shape[-1], 2
-    z, v, diff, sq, one_minus_zz, h = HyperBridge._cartesian_geometry(rhos, thetas, V)
-
-    # target term: (y - z) / ||y - z||^2
-    y_minus_z = v[targets] - z                                       # (N, 2)
-    target = y_minus_z / y_minus_z.square().sum(-1, keepdim=True)    # (N, 2)
-
-    # model term: E_{v ~ mu^theta(.|z)}[ (v - z) / ||v - z||^2 ]
-    mu = ((d - 1) * h + logits.to(torch.float64)).softmax(-1)        # (N, V)
-    model = HyperBridge._expected_radial(mu, diff, sq)               # (N, 2)
-
-    return HyperBridge._cartesian_squared_residual(target, model, one_minus_zz, d=d)
-```
+- Test set: **4,000,000** samples per run
+- **Two training losses** compared head-to-head:
+  - <r>`cross_entropy`</r> — plain CE on the denoiser logits
+  - <b>`poincare_polar`</b> — geometry-aware bridge ELBO
 
 ---
 
-## Lorentz - Cartesian Bridge ELBO Loss
+## Two Metrics, Two Roles
 
-```python
-@staticmethod
-    def _lorentz_boundary_points(V, device, dtype):
-        phis = (torch.arange(V, device=device, dtype=dtype) + 0.5) * (2 * torch.pi / V)
-        return torch.stack([torch.ones_like(phis), phis.cos(), phis.sin()], dim=-1)
-
-    @staticmethod
-    def _lorentz_inner(x, y):
-        return -x[..., 0] * y[..., 0] + (x[..., 1:] * y[..., 1:]).sum(-1)
-
-    @staticmethod
-    def _lorentz_geometry(rhos, thetas, V, d):
-        z = HyperBridge.polar_to_lorentz(rhos, thetas) # (N, 3)
-        xi = HyperBridge._lorentz_boundary_points(V, rhos.device, rhos.dtype)
-        inner = HyperBridge._lorentz_inner(z[:, None, :], xi[None, :, :]) # (N, V), negative
-        log_poisson = (d - 1) *  (-(-inner).clamp_min(1e-300).log()) # (d - 1) * log 1 / (-<z,xi(y)>)
-        directions = xi[None, :, :] / inner[:, :, None] # xi(y) / <z,xi(y)>
-        return directions, log_poisson
-
-    @staticmethod
-    def _lorentz_norm_sq(x):
-        return HyperBridge._lorentz_inner(x, x).clamp_min(0)
-
-    @staticmethod
-    def binary_bridge_loss_lorentz(logits, targets, rhos, thetas):
-        V, d = logits.shape[-1], 2
-        directions, log_poisson = HyperBridge._lorentz_geometry(rhos, thetas, V, d)
-        mu = (log_poisson + logits.to(torch.float64)).softmax(-1) 
-        target = directions[torch.arange(targets.numel(), device=targets.device), targets]
-        model = (mu[:, :, None] * directions).sum(-2)
-        residual = target - model
-        return (d - 1) ** 2 / 2 * HyperBridge._lorentz_norm_sq(residual)
-```
+| Metric | What it measures | Estimator |
+|---|---|---|
+| `test_ce` | plain cross-entropy of the denoiser logits | model's **own** loss proposal |
+| `test_wnelbo` | importance-weighted **Poincaré** bridge ELBO | **fixed**: `poincare_polar`, stratified-exp $\lambda{=}0.1$ |
 
 ---
 
-## Experiment Set Up
+## Compare Cross Entropy and ELBO Losses
 
-- Vocab Size: 2
-- Testing Dataset Size: 4000
-- Prob Dist of Training Dataset: [0.8, 0.2]
-- Testing Data Entropy: 0.5
-- Model ouputs the likelihood of the dataset
-- Removed Truncation of Exponential distribution proposal
+![w:780 center](ce_vs_pp_compare.jpg)
+
+- Exp Proposal: <b>Poincaré</b> beats <r>CE</r>
+- Unif Proposal: <b>Poincaré</b> similar <r>CE</r>
 
 ---
 
-### Lorentz Model - Cartesian Coordinate
+## `test_wnelbo` Results
 
-- Unif[0.01, 10]: 0.6595
-- Exp(0.01): 0.7816
-- Exp(0.1): 0.6777
-- Exp(0.5): 0.7120
-- Exp(0.8): 0.6507
-- Exp(1.0): 0.6003
-- Exp(2.0): 0.4527
-- Exp(3.0): 
-
----
-
-### Poincare Disk - Polar Coordinate
-
-- Unif[0.01, 10]: 0.6595
-- Exp(0.01): 0.7816
-- Exp(0.1): 0.6777
-- Exp(0.5): 0.7120
-- Exp(1.0): 0.6003
-- Exp(2.0): 0.4527
-- Exp(3.0): 0.3933
+| proposal | <r>CE-trained</r> | <b>PP-trained</b> | CE / PP |
+|:--:|:--:|:--:|:--:|
+| uniform | 0.481 | **0.416** | 1.2× |
+| 0.01 | <r>NaN</r> | <r>NaN</r> | — |
+| **0.1** | <r>2.031</r> | **0.396** | **5.1×** |
+| 0.2 | <r>2.017</r> | 0.414 | 4.9× |
+| 0.3 | <r>2.009</r> | 0.430 | 4.7× |
+| 0.5 | <r>1.999</r> | 0.512 | 3.9× |
+| 0.8 | <r>1.992</r> | 0.983 | 2.0× |
+| 1.0 | <r>1.991</r> | 1.355 | 1.5× |
+| 2.0 | <r>1.995</r> | 1.716 | 1.2× |
 
 ---
 
-### Poincare Disk - Cartesian Coordinate
+## `test_ce` — Cross-Entropy
 
-- Unif[0.01, 10]: 0.6595
-- Exp(0.01): NaN
-- Exp(0.1): NaN
-- Exp(0.5): 0.7120
-- Exp(1.0): 0.6003
-- Exp(2.0): 0.4527
-- Exp(3.0): 0.3933
+| proposal | <r>CE-trained</r> | <b>PP-trained</b> | winner |
+|:--:|:--:|:--:|:--:|
+| uniform | **0.316** | 0.966 | <r>CE</r> |
+| 0.01 | <r>NaN</r> | <r>NaN</r> | — |
+| 0.1 | 1.984 | 1.835 | PP |
+| 0.2 | 1.981 | 0.891 | PP |
+| 0.3 | 1.979 | **0.545** | <b>PP</b> |
+| 0.5 | 1.979 | 0.618 | <b>PP</b> |
+| 0.8 | 1.981 | 1.206 | PP |
+| 1.0 | 1.982 | 1.648 | PP |
+| 2.0 | 1.990 | 2.003 | tie |
 
----
-
-### Experiment Set Up
-
-- Vocab Size: 10
-- Testing Dataset Size: 4000
-- Prob Dist of Training Dataset: [0.91, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
-- Testing Data Entropy: 0.5
-- Model ouputs the likelihood of the dataset
-- Removed Truncation of Exponential distribution proposal
+**Surprise:** the ELBO loss yields *lower cross-entropy* than the CE loss at every stratified $\lambda$ (e.g. $\lambda{=}0.3$: **0.545 vs 1.979**). CE wins **only** under the uniform proposal (0.316, below the 0.50 floor).
 
 ---
 
-### Lorentz - Cartesian Coordinate
+## Why Cross-Entropy Loss Fails Under Importance Sampling
 
-- Unif[0.01, 10]: 0.4384
-- Exp(0.01): 0.4330
-- Exp(0.1): 0.5167
-- Exp(0.5): 0.4956
-- Exp(0.8): 0.7484
-- Exp(1.0): 0.3880
-- Exp(2.0): 0.2978
-- Exp(3.0): 
+The proposal weight (=  1 / propsal density) grows exponentially as time goes up, causing cross entropy loss blow-up, while the Poinare ELBO loss will be re-scaled by $(1 - \|z_t\|^2)^2$
+
+- Exp(0.1)
+
+![w:300 center](image.png)
 
 ---
 
-### Poincare Disk - Polar Coordinate
+## Why Cross-Entropy Loss Fails Under Importance Sampling
 
-- Unif[0.01, 10]: 0.5101
-- Exp(0.01): 0.4935
-- Exp(0.1): 0.5184
-- Exp(0.5): 0.4550
-- Exp(1.0): 0.4202
-- Exp(2.0): 0.2468
-- Exp(3.0): 0.2453
+- Exp(0.5)
 
----
+![w:300 center](image-1.png)
 
-### Poincare Disk - Cartesian Coordinate
+- Exp(1.0)
 
-- Unif[0.01, 10]: 0.5101
-- Exp(0.01): NaN
-- Exp(0.1): NaN
-- Exp(0.5): 0.4550
-- Exp(1.0): 0.4202
-- Exp(2.0): 0.2468
-- Exp(3.0): 0.2453
+![w:300 center](image-2.png)
 
 ---
 
-### Experiment Set Up
+# Next Steps
 
-- Vocab Size: 10
-- Testing Dataset Size: **90000**
-- Prob Dist of Training Dataset: [0.91, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01]
-- Testing Data Entropy: 0.5
-- Model ouputs the likelihood of the dataset
-- Removed Truncation of Exponential distribution proposal
-
-- I've also implemented cartesian coordinate version to make sure 
-
----
-
-### Poincare Disk - Polar Coordinate
-
-- Unif[0.01, 10]: 0.4774
-- Exp(0.01): 0.5345
-- Exp(0.1): 0.5558
-- Exp(0.5): 0.5444
-- Exp(1.0): 0.4476
-- Exp(2.0): 0.3341
-- Exp(3.0): 0.2321
-
----
-
-### Poinare Disk - Cartesian Coordinate
-
-- Unif[0.01, 10]: 0.4774
-- Exp(0.01): NaN
-- Exp(0.1): NaN
-- Exp(0.5): 0.5444
-- Exp(1.0): 0.4476
-- Exp(2.0): 0.3341
-- Exp(3.0): 0.2321
-
----
-
-## Trucation at Large $\lambda$
-
-$$
-p(t) = \lambda e^{-\lambda t}
-$$
-
-- At $\lambda = 1.0$
-$$
-\begin{aligned}
-  p(10.0) &= e^{-10} = 0.0000454 \\
-  p(100.0) &= e^{-100} = 3.7e-44 \\
-\end{aligned}
-$$
-- At $\lambda = 0.1$
-$$
-\begin{aligned}
-  p(10.0) &= 0.1 \times e^{-1.0} = 0.0367 \\
-  p(100.0) &= 0.1 \times e^{-10} = 0.00000454 \\
-\end{aligned}
-$$
-
-The truncation cause the low test_loss as $\lambda$ is large, because the loss ignores the tail (large $t$ close to boundary)
+- Visualize the cross entropy loss across various timestep, see if the loss value is invariant across timesteps
+- Try Unif with larger timestep range
+- Set up trainable word embedding and compare with fixed word embedding
+- Enlarge the vocab size and more complicated distribution
+- Implement high-dim Hyperbolic heat kernel and posterior
 
 ---
 
@@ -519,9 +315,8 @@ of the test NELBO estimator?
 - Proposal: **stratified exponential**, rate $\lambda \in \{0.01, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 2.0\}$
 - Bridge horizon: `hyper_T` $= 1000$, `hyper_dt` $= 0.01$
 - Test set: **4,000,000** samples per run
-- Repeats: **21 random seeds** (rs42–rs62) per $\lambda$ → 168 runs / geometry
+- Repeats: **21 random seeds** per $\lambda$
 - Geometries: **Lorentz–Cartesian**, **Poincaré–Polar**
-- Driver: `unigram/unigram_test2_tmp2.py`; aggregated by `unigram/calc_var.py`
 
 ---
 
@@ -534,17 +329,14 @@ For an **optimal model**, the test NELBO should equal the data entropy.
 | Cross-entropy (data entropy) | **0.5003** |
 | ⇒ ideal `test_loss` | **≈ 0.500** |
 
-A good $\lambda$ is **(1)** NaN-free, **(2)** unbiased (mean $\approx 0.500$), **(3)** low-variance.
-
-`test_loss` = importance-sampled NELBO  ·  `test_loss_var` = its within-test-set variance
+- `test_loss` = IS-NELBO
+- `test_loss_var` = variance of IS-NELBO (IS-NELBO Var)
 
 ---
 
 ## Poincaré–Polar — Test NELBO vs $\lambda$
 
-Small $\lambda$ (0.1–0.3) is **unbiased**; large $\lambda$ drifts **below** the 0.500 target.
-
-| $\lambda$ | valid | `test_loss` (mean ± std) | `test_loss_var` |
+| $\lambda$ | valid | IS-NELBO (mean ± std) | IS-NELBO Var |
 |:--:|:--:|:--:|:--:|
 | 0.01 | 0 / 21 | <r>NaN</r> | <r>NaN</r> |
 | 0.1  | 21 / 21 | **0.5001 ± 0.0011** | 9 |
@@ -557,19 +349,11 @@ Small $\lambda$ (0.1–0.3) is **unbiased**; large $\lambda$ drifts **below** th
 
 ---
 
-## Poincaré–Polar — `test_loss` across seeds
+## Poincaré–Polar — Test NELBO vs $\lambda$
 
-![width:760 center](calc_var_poincare_test_loss.png)
+- Small $\lambda$ (0.1–0.3) is **unbiased**; large $\lambda$ drifts **below** the 0.500 target.
 
-Mean stays on-target until $\lambda \gtrsim 0.5$; seed-to-seed **std grows ~40×** ($\lambda{=}0.1 \to 1.0$).
-
----
-
-## Poincaré–Polar — Estimator variance explodes with $\lambda$
-
-![width:760 center](calc_var_poincare_test_loss_var.png)
-
-`test_loss_var` rises from **9** ($\lambda{=}0.1$) to **9,100** ($\lambda{=}1.0$) — a **~1000×** blow-up.
+- IS-NELBO Var rises from **9** ($\lambda{=}0.1$) to **9,100** ($\lambda{=}1.0$)
 
 ---
 
@@ -577,55 +361,34 @@ Mean stays on-target until $\lambda \gtrsim 0.5$; seed-to-seed **std grows ~40×
 
 Lorentz is **far more fragile**: every $\lambda \le 0.5$ collapses to NaN.
 
-| $\lambda$ | valid | `test_loss` (mean ± std) | `test_loss_var` |
+| $\lambda$ | valid | IS-NELBO (mean ± std) | IS-NELBO Var |
 |:--:|:--:|:--:|:--:|
-| 0.01 – 0.5 | 0 / 21 | <r>NaN</r> | <r>NaN</r> |
+| <0.5 | 0 / 21 | <r>NaN</r> | <r>NaN</r> |
 | 0.8  | 16 / 21 | 0.4812 ± 0.0228 | 1,808 |
 | 1.0  | 20 / 21 | 0.4809 ± 0.0471 | 9,527 |
 | 2.0  | 21 / 21 | <r>0.3864</r> ± 0.0416 | 5,259 |
-
-Even at $\lambda = 0.8$, 5 / 21 seeds still produce NaN.
-
----
-
-## Lorentz–Cartesian — `test_loss` across seeds
-
-![width:760 center](calc_var_lorentz_test_loss.png)
-
-Only $\lambda \in \{0.8, 1.0, 2.0\}$ survive — the surviving points coincide with Poincaré.
 
 ---
 
 ## Three Regimes of the Proposal Rate $\lambda$
 
-| Regime | $\lambda$ (Poincaré) | Behaviour |
+| Regime | $\lambda$ (Polar) | Behaviour |
 |---|:--:|---|
 | **Too small** | $\le 0.01$ | <r>NaN</r> — heavy-tailed weights $1/(\lambda u)$ blow up |
 | **Stable** | **0.1 – 0.3** | <b>unbiased</b> (mean ≈ 0.500), variance 9 – 63 |
 | **Too large** | $\ge 0.8$ | variance $10^3$–$10^4$; <r>biased low</r> (0.39 at $\lambda{=}2$) |
 
-The low `test_loss` at large $\lambda$ is **not** an improvement — it under-counts the boundary tail.
-
 ---
 
-## Takeaways
+## Conclusion
 
 - **Sweet spot: $\lambda \approx 0.1$** (Poincaré–Polar) — recovers the target (0.5001 vs 0.500) with the smallest seed std (0.001) and lowest estimator variance (9).
-- **Variance grows monotonically with $\lambda$** — ~1000× from $\lambda{=}0.1$ to $\lambda{=}1.0$; the estimate becomes seed-dependent and unusable.
+- **Variance grows monotonically with $\lambda$**, numerically unstable
 - **Large $\lambda$ ($\ge 2$) is biased low** (0.386 < 0.500) — consistent with tail-truncation, not a tighter bound.
-- **Lorentz–Cartesian is numerically fragile** — needs $\lambda \ge 0.8$ just to avoid NaN, vs $\lambda \ge 0.1$ for Poincaré.
 
 ---
 
-## Next Step
-
-- Sweep finer $\lambda$ around **0.1–0.2** to pin the variance-minimising rate.
-- Diagnose the Lorentz NaN at small $\lambda$ (boundary blow-up in `_lorentz_norm_sq`).
-- Use a **log-scale** $\lambda$ axis / log `test_loss_var` axis in the `calc_var` plots.
-
----
-
-## Stratified-Exp Proposal — NELBO, IS+NELBO, and Proposal Weight Vis
+<!-- ## Stratified-Exp Proposal — NELBO, IS+NELBO, and Proposal Weight Visualization
 
 ---
 
@@ -634,8 +397,8 @@ The low `test_loss` at large $\lambda$ is **not** an improvement — it under-co
 Open up the test loss — **per-sample** views vs timestep $t$:
 
 - **NELBO** $\ell(t)$ — the un-weighted loss integrand (geometry behaviour)
-- **IS·NELBO** $\ell(t)\,w(t)$ — what the test-loss estimator actually averages
-- **Proposal density** $p(t) = \lambda e^{-\lambda t}$ — *where* samples land along $t$
+- **Weighted  NELBO** $\ell(t)\,w(t)$ — what the test-loss estimator actually averages, weighted by IS
+- **Proposal density** $p(t)=  \lambda e^{-\lambda t}$ — *where* samples land along $t$
 
 Goal: explain **why** small $\lambda$ NaNs (Lorentz) and large $\lambda$ blows up the variance.
 
@@ -643,25 +406,24 @@ Goal: explain **why** small $\lambda$ NaNs (Lorentz) and large $\lambda$ blows u
 
 ## Experiment Set Up
 
-### Single-Seed Stratified-Exp Sweep — `unigram_test_lorentz_tmp3.sh`
-
 - Driver: `unigram/unigram_test2_tmp3.py`, **seed = 42**
 - Model: **optimal** (`mode=opt`) — emits ground-truth unigram dist, no training
 - Vocab size: 10  |  Data dist: $[0.91,\ 0.01\times 9]$  |  entropy ≈ **0.5003**
 - Bridge horizon: `hyper_T = 1000`, `hyper_dt = 0.01`, `rotate_emb = True`
 - Test set: **4,000,000** samples per run
 - Proposal: **stratified exponential**, $\lambda \in \{0.01, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0, 2.0\}$
-- Geometries: **Lorentz–Cartesian** and **Poincaré–Polar** (8 rates × 2 geoms = 16 runs)
-
+- Geometries: **Lorentz–Cartesian** and **Poincaré–Polar** 
 ---
 
 ## What Each Plot Shows
 
 Per-sample log–log scatter of 4M samples (one figure per run, three stacked panels):
 
-1. **weighted NELBO** $\ell(t)\,w(t)$ — mean over samples = `test_loss`
-2. **NELBO (unweighted)** $\ell(t)$ — pure geometry / bridge term
-3. **proposal density** $p(t) = \lambda e^{-\lambda t}$ — peaks at $t=0$, decays at rate $\lambda$
+1. **Weighted NELBO** $\ell(t)\,w(t)$ — `W-NELBO`
+2. **NELBO (unweighted)** $\ell(t)$ — pure bridge term = `UW-NELNO`
+3. **proposal density** $p(t) = \lambda e^{-\lambda t}$ exponential distribution
+
+The Idea **Weighted NELBO** = **0.5003** (data entropy)
 
 Generated by `plot_test_loss_vs_timestep` in `unigram/unigram_test2_tmp3.py:615`.
 
@@ -669,7 +431,7 @@ Generated by `plot_test_loss_vs_timestep` in `unigram/unigram_test2_tmp3.py:615`
 
 ## Poincaré–Polar — Summary (seed 42)
 
-| $\lambda$ | `test_loss` | `test_nelbo` | `test_loss_var` |
+| $\lambda$ | `W-NELBO` | `UW-NELNO` | `W-NELBO Var` |
 |:--:|:--:|:--:|:--:|
 | 0.01 | <r>NaN</r> | <r>NaN</r> | <r>NaN</r> |
 | 0.1  | **0.4995** | 0.0338 | **9.3** |
@@ -680,13 +442,11 @@ Generated by `plot_test_loss_vs_timestep` in `unigram/unigram_test2_tmp3.py:615`
 | 1.0  | 0.4914 | 0.0854 | 4,349 |
 | 2.0  | <r>0.3539</r> | 0.0914 | 1,349 |
 
-Target: `test_ce` = **0.5003** (data entropy). Best $\lambda$: **0.1** — on target, ~470× lower variance than $\lambda{=}1.0$.
-
 ---
 
 ## Lorentz–Cartesian — Summary (seed 42)
 
-| $\lambda$ | `test_loss` | `test_nelbo` | `test_loss_var` |
+| $\lambda$ | `W-NELBO` | `UW-NELNO` | `W-NELBO Var` |
 |:--:|:--:|:--:|:--:|
 | 0.01 | <r>NaN</r> | <r>NaN</r> | <r>NaN</r> |
 | 0.1  | <r>NaN</r> | <r>NaN</r> | <r>NaN</r> |
@@ -696,8 +456,6 @@ Target: `test_ce` = **0.5003** (data entropy). Best $\lambda$: **0.1** — on ta
 | 0.8  | 0.4936 | 0.0824 | 1,248 |
 | 1.0  | 0.4914 | 0.0854 | 4,349 |
 | 2.0  | <r>0.3539</r> | 0.0914 | 1,349 |
-
-For $\lambda \ge 0.8$ Lorentz **matches Poincaré bit-for-bit**. Small $\lambda$ NaNs come from $\ell(t)$ blow-ups at the boundary, not from the proposal.
 
 ---
 
@@ -717,9 +475,7 @@ The story across $\lambda$: NaN regime → stable regime → variance blow-up �
 
 **Poincaré: <r>NaN</r>**  ·  **Lorentz: <r>NaN</r>**
 
-![w:340](ts_poincare_per0.01.jpg) ![w:340](ts_lorentz_per0.01.jpg)
-
-Density barely decays → samples reach $t \sim 10^3$ where $\ell(t)$ underflows and IS weight $e^{\lambda t}/\lambda$ multiplies $0$ by $\infty$.
+![w:300](ts_poincare_per0.01.jpg) ![w:300](ts_lorentz_per0.01.jpg)
 
 ---
 
@@ -727,9 +483,7 @@ Density barely decays → samples reach $t \sim 10^3$ where $\ell(t)$ underflows
 
 **Poincaré: 0.4995, var 9.3**  ·  **Lorentz: <r>NaN</r>**
 
-![w:340](ts_poincare_per0.1.jpg) ![w:340](ts_lorentz_per0.1.jpg)
-
-Bulk scatters look identical. Lorentz's rare tail reaches $\ell \sim 10^3$ (vs $\sim 1$ for Poincaré) — boundary blow-up in $\langle z_t, \xi(y)\rangle_L$.
+![w:300](ts_poincare_per0.1.jpg) ![w:300](ts_lorentz_per0.1.jpg)
 
 ---
 
@@ -737,9 +491,7 @@ Bulk scatters look identical. Lorentz's rare tail reaches $\ell \sim 10^3$ (vs $
 
 **Poincaré: 0.5020, var 17.6**  ·  **Lorentz: <r>NaN</r>**
 
-![w:340](ts_poincare_per0.2.jpg) ![w:340](ts_lorentz_per0.2.jpg)
-
-Variance roughly **2×** $\lambda{=}0.1$. Lorentz NaN persists — the issue is the geometry's tail, not how often we sample it.
+![w:300](ts_poincare_per0.2.jpg) ![w:300](ts_lorentz_per0.2.jpg)
 
 ---
 
@@ -747,9 +499,7 @@ Variance roughly **2×** $\lambda{=}0.1$. Lorentz NaN persists — the issue is 
 
 **Poincaré: 0.4997, var 57.6**  ·  **Lorentz: <r>NaN</r>**
 
-![w:340](ts_poincare_per0.3.jpg) ![w:340](ts_lorentz_per0.3.jpg)
-
-Variance starts climbing fast (~**6×** $\lambda{=}0.1$); IS·NELBO panel widens visibly at large $t$.
+![w:300](ts_poincare_per0.3.jpg) ![w:300](ts_lorentz_per0.3.jpg)
 
 ---
 
@@ -757,9 +507,7 @@ Variance starts climbing fast (~**6×** $\lambda{=}0.1$); IS·NELBO panel widens
 
 **Poincaré: 0.5045, var 524**  ·  **Lorentz: <r>NaN</r>**
 
-![w:340](ts_poincare_per0.5.jpg) ![w:340](ts_lorentz_per0.5.jpg)
-
-Poincaré IS·NELBO now reaches $\sim 10^2$ — variance has jumped **~10×** vs $\lambda{=}0.3$.
+![w:300](ts_poincare_per0.5.jpg) ![w:300](ts_lorentz_per0.5.jpg)
 
 ---
 
@@ -767,9 +515,7 @@ Poincaré IS·NELBO now reaches $\sim 10^2$ — variance has jumped **~10×** vs
 
 **Poincaré: 0.4936, var 1,248**  ·  **Lorentz: 0.4936, var 1,248**
 
-![w:340](ts_poincare_per0.8.jpg) ![w:340](ts_lorentz_per0.8.jpg)
-
-First $\lambda$ where Lorentz survives. The two `test_loss` / `test_loss_var` numbers match bit-for-bit ⇒ when finite, the two formulations are numerically equivalent.
+![w:300](ts_poincare_per0.8.jpg) ![w:300](ts_lorentz_per0.8.jpg)
 
 ---
 
@@ -777,9 +523,7 @@ First $\lambda$ where Lorentz survives. The two `test_loss` / `test_loss_var` nu
 
 **Poincaré: 0.4914, var 4,349**  ·  **Lorentz: 0.4914, var 4,349**
 
-![w:340](ts_poincare_per1.0.jpg) ![w:340](ts_lorentz_per1.0.jpg)
-
-Top panel IS·NELBO reaches $\sim 10^3$. Density falls off past $t \approx 5$ — rare large-$t$ samples carry huge IS weights and dominate the mean.
+![w:300](ts_poincare_per1.0.jpg) ![w:300](ts_lorentz_per1.0.jpg)
 
 ---
 
@@ -787,9 +531,7 @@ Top panel IS·NELBO reaches $\sim 10^3$. Density falls off past $t \approx 5$ �
 
 **Poincaré: <r>0.3539</r>, var 1,349**  ·  **Lorentz: <r>0.3539</r>, var 1,349**
 
-![w:340](ts_poincare_per2.0.jpg) ![w:340](ts_lorentz_per2.0.jpg)
-
-Density collapses by $t \approx 3$; the bridge tail is essentially never sampled. `test_loss` drops **0.39 < 0.5** — not a tighter bound, just missing integration mass.
+![w:300](ts_poincare_per2.0.jpg) ![w:300](ts_lorentz_per2.0.jpg)
 
 ---
 
@@ -804,12 +546,9 @@ Density collapses by $t \approx 3$; the bridge tail is essentially never sampled
 
 ---
 
-## Takeaways
+## Conclusion
 
-- **Per-sample views separate two failure modes** — small-$\lambda$ NaN is a **geometry** issue (Lorentz boundary), large-$\lambda$ variance is an **estimator** issue (heavy IS weights).
-- **Poincaré $\lambda = 0.1$ is the sweet spot** — on-target mean (0.4995) and lowest variance (9.3) among non-NaN rates.
-- **Lorentz and Poincaré agree** whenever Lorentz is finite ($\lambda \ge 0.8$); fixing the Lorentz boundary in `_lorentz_norm_sq` would close the gap at $\lambda \le 0.5$.
-- The IS·NELBO panel makes the variance blow-up visible: at $\lambda = 1.0$ a few samples reach $10^3$, dominating the mean.
+- Don't know why the visualized Lorentz per-sample estimate seem to have smaller variance than Poincare. They should be identical -->
 
 ---
 
@@ -819,33 +558,34 @@ Density collapses by $t \approx 3$; the bridge tail is essentially never sampled
 
 ## Motivation
 
-The seed-variance and per-sample studies all used **one** ground-truth distribution
-with entropy $\approx 0.500$. Do the same regimes hold when the data entropy changes?
-
 We re-run the optimal model (`mode=opt`, model output = ground truth) against **two new ground-truth unigrams** with very different entropies and inspect the test ELBO and CE across $\lambda$.
 
 - **Low entropy** (`cmplx_ps`): concentrated on a few tokens
 - **High entropy** (`cmplx_ps1`): near-uniform
 
-Drivers: `unigram_test_script/unigram_test_lorentz_tmp3_cmplx_ps.sh`, `..._ps1.sh`.
+Script: `unigram_test_script/unigram_test_lorentz_tmp3_cmplx_ps.sh`, `..._ps1.sh`.
 
 ---
 
 ## Experiment Set Up
 
-- Driver: `unigram/unigram_test2_tmp3.py`, **seed = 42**
+- Script: `unigram/unigram_test2_tmp3.py`, **seed = 42**
 - Model: **optimal** (`mode=opt`) — emits ground-truth unigram dist, no training
 - Vocab size: **10**  |  bridge horizon: `hyper_T = 1000`, `hyper_dt = 0.01`, `rotate_emb = True`
 - Test set: **4,000,000** samples per run
 - Proposal: **stratified exponential**, $\lambda \in \{0.01, 0.1, 0.2, 0.3, 0.4, 0.5, 0.8, 1.0, 2.0\}$, plus uniform $[0.01, 10]$ baseline
 - Geometries: **Lorentz–Cartesian**, **Poincaré–Polar**
 
-| Tag | Ground-truth $p$ | $H(p)$ = `test_ce` |
+---
+
+## Experiment Set Up
+
+Ground-truth data distribution
+
+| Tag | Ground-truth $p$ | $H(p)$ |
 |---|---|:--:|
 | `cmplx_ps`  | $[0.31, 0.01, 0.20, 0.01, 0.01, 0.30, 0.08, 0.04, 0.03, 0.01]$ | **1.6664** |
 | `cmplx_ps1` | $[0.11, 0.10, 0.10, 0.11, 0.11, 0.10, 0.10, 0.10, 0.09, 0.08]$ | **2.2985** |
-
-Upper bound for $V{=}10$: $\log 10 \approx 2.3026$; `ps1` is essentially uniform.
 
 ---
 
@@ -858,199 +598,79 @@ For the optimal model the test ELBO equals the data entropy:
 | `cmplx_ps`  (low entropy) | **1.6664** |
 | `cmplx_ps1` (high entropy) | **2.2985** |
 
-A good $\lambda$ is **(1)** NaN-free, **(2)** unbiased (mean $\approx$ target CE), **(3)** low-variance — exactly the same criteria as before, just with two different targets.
+A good $\lambda$ is **(1)** NaN-free, **(2)** unbiased (mean $\approx$ target CE), **(3)** low-variance
 
 ---
 
-## Low-Entropy GT (`cmplx_ps`, CE = 1.6664) — Poincaré–Polar
-
-| $\lambda$ | `test_loss` (ELBO) | `test_nelbo` | `test_loss_var` | std$/\sqrt{N}$ |
-|:--:|:--:|:--:|:--:|:--:|
-| unif $[0.01,10]$ | <r>1.5008</r> | 0.1502 | 7.5 | 0.0014 |
-| 0.01 | <r>NaN</r> | <r>NaN</r> | <r>NaN</r> | — |
-| **0.1**  | **1.6665** | 0.1200 | **18.5** | **0.0022** |
-| 0.2  | 1.6672 | 0.1899 | 43.1 | 0.0033 |
-| 0.3  | 1.6655 | 0.2370 | 146.1 | 0.0060 |
-| 0.4  | 1.6569 | 0.2710 | 224.9 | 0.0075 |
-| 0.5  | 1.6682 | 0.2970 | 1,258 | 0.0177 |
-| 0.8  | 1.8878 | 0.3479 | 332,725 | 0.288 |
-| 1.0  | 1.5875 | 0.3693 | 4,490 | 0.0335 |
-| 2.0  | <r>1.3483</r> | 0.4223 | 16,832 | 0.0649 |
-
-Target = **1.6664**. Best $\lambda$ = **0.1**: on-target (1.6665) with the lowest variance.
+## Low-Entropy (`cmplx_ps`, $H(p)$ = 1.6664)
 
 ---
 
-## Low-Entropy GT — Lorentz–Cartesian
+### Low-Entropy — Poincaré–Polar
 
-| $\lambda$ | `test_loss` (ELBO) | `test_nelbo` | `test_loss_var` |
-|:--:|:--:|:--:|:--:|
-| unif $[0.01,10]$ | <r>NaN</r> | <r>NaN</r> | <r>NaN</r> |
-| 0.01 – 0.5 | <r>NaN</r> | <r>NaN</r> | <r>NaN</r> |
-| 0.8  | 1.8878 | 0.3479 | 332,725 |
-| 1.0  | 1.5875 | 0.3693 | 4,490 |
-| 2.0  | <r>1.3483</r> | 0.4223 | 16,832 |
-
-Lorentz remains numerically fragile: every $\lambda \le 0.5$ NaNs. Whenever both geometries are finite, **Lorentz = Poincaré** bit-for-bit.
-
----
-
-## High-Entropy GT (`cmplx_ps1`, CE = 2.2985) — Poincaré–Polar
-
-| $\lambda$ | `test_loss` (ELBO) | `test_nelbo` | `test_loss_var` | std$/\sqrt{N}$ |
-|:--:|:--:|:--:|:--:|:--:|
-| unif $[0.01,10]$ | <r>2.0530</r> | 0.2055 | 7.5 | 0.0014 |
-| 0.01 | <r>NaN</r> | <r>NaN</r> | <r>NaN</r> | — |
-| **0.1**  | **2.2984** | 0.1615 | **22.7** | **0.0024** |
-| 0.2  | 2.2950 | 0.2505 | 42.8 | 0.0033 |
-| 0.3  | 2.2829 | 0.3071 | 135.0 | 0.0058 |
-| 0.4  | 2.2871 | 0.3463 | 562.6 | 0.0119 |
-| 0.5  | 2.2872 | 0.3746 | 1,996 | 0.0223 |
-| 0.8  | 2.6807 | 0.4256 | 904,924 | 0.476 |
-| 1.0  | 2.1632 | 0.4444 | 5,135 | 0.0358 |
-| 2.0  | <r>1.8579</r> | 0.4820 | 36,502 | 0.0955 |
-
-Target = **2.2985**. Best $\lambda$ = **0.1**: on-target (2.2984) with the lowest variance.
-
----
-
-## High-Entropy GT — Lorentz–Cartesian
-
-| $\lambda$ | `test_loss` (ELBO) | `test_nelbo` | `test_loss_var` |
-|:--:|:--:|:--:|:--:|
-| unif $[0.01,10]$ | <r>NaN</r> | <r>NaN</r> | <r>NaN</r> |
-| 0.01 – 0.5 | <r>NaN</r> | <r>NaN</r> | <r>NaN</r> |
-| 0.8  | 2.6807 | 0.4256 | 904,924 |
-| 1.0  | 2.1632 | 0.4444 | 5,135 |
-| 2.0  | <r>1.8579</r> | 0.4820 | 36,502 |
-
-Same Lorentz-boundary fragility as the low-entropy case; same exact match with Poincaré whenever finite.
-
----
-
-## ELBO vs CE Across Entropies — Side-by-Side
-
-`test_loss` of the optimal model at the recommended rate $\lambda = 0.1$ (Poincaré–Polar):
-
-| GT | `test_ce` (target) | `test_loss` @ $\lambda{=}0.1$ | abs. gap | rel. gap |
-|---|:--:|:--:|:--:|:--:|
-| `cmplx_ps`  (low entropy) | 1.6664 | **1.6665** | $+1\!\times\!10^{-4}$ | $0.006\%$ |
-| `cmplx_ps1` (high entropy) | 2.2985 | **2.2984** | $-1\!\times\!10^{-4}$ | $0.004\%$ |
-
-The optimal-model ELBO matches CE to **4 decimal places** at $\lambda = 0.1$ for *both* ground truths.
-
-The uniform-proposal baseline systematically **under-counts** by 0.17–0.25 (truncated at $t = 10$).
-
----
-
-## Low-Entropy GT — $\lambda = 0.1$ (sweet spot, Lorentz NaN)
-
-**Poincaré: 1.6665, var 18.5**  ·  **Lorentz: <r>NaN</r>**
-
-![w:340](ts_cmplx_ps_pp_per0.1.jpg) ![w:340](ts_cmplx_ps_lc_per0.1.jpg)
-
-Bulk scatters match the per-rate panels from the seed-variance study; only the IS·NELBO mean shifts up to track CE = 1.6664.
-
----
-
-## Low-Entropy GT — $\lambda = 0.5$ (Poincaré stable, Lorentz NaN)
-
-**Poincaré: 1.6682, var 1,258**  ·  **Lorentz: <r>NaN</r>**
-
-![w:340](ts_cmplx_ps_pp_per0.5.jpg) ![w:340](ts_cmplx_ps_lc_per0.5.jpg)
-
-Variance has climbed ~70×; mean still on target.
-
----
-
-## Low-Entropy GT — $\lambda = 1.0$ (variance blow-up, geometries agree)
-
-**Poincaré: 1.5875, var 4,490**  ·  **Lorentz: 1.5875, var 4,490**
-
-![w:340](ts_cmplx_ps_pp_per1.0.jpg) ![w:340](ts_cmplx_ps_lc_per1.0.jpg)
-
-Top panel IS·NELBO reaches $\sim 10^3$; mean has drifted ~0.08 below target.
-
----
-
-## Low-Entropy GT — $\lambda = 2.0$ (biased low, tail under-sampled)
-
-**Poincaré: <r>1.3483</r>, var 16,832**  ·  **Lorentz: <r>1.3483</r>, var 16,832**
-
-![w:340](ts_cmplx_ps_pp_per2.0.jpg) ![w:340](ts_cmplx_ps_lc_per2.0.jpg)
-
-Density collapses by $t \approx 3$; ELBO drops to **1.35 < CE = 1.67** — missing tail mass.
-
----
-
-## High-Entropy GT — $\lambda = 0.1$ (sweet spot, Lorentz NaN)
-
-**Poincaré: 2.2984, var 22.7**  ·  **Lorentz: <r>NaN</r>**
-
-![w:340](ts_cmplx_ps1_pp_per0.1.jpg) ![w:340](ts_cmplx_ps1_lc_per0.1.jpg)
-
-IS·NELBO mean shifts up to track the higher CE = 2.2985; everything else identical to low-entropy.
-
----
-
-## High-Entropy GT — $\lambda = 0.5$ (Poincaré stable, Lorentz NaN)
-
-**Poincaré: 2.2872, var 1,996**  ·  **Lorentz: <r>NaN</r>**
-
-![w:340](ts_cmplx_ps1_pp_per0.5.jpg) ![w:340](ts_cmplx_ps1_lc_per0.5.jpg)
-
-Same regime shape, variance ~1.6× the low-entropy case at the same $\lambda$.
-
----
-
-## High-Entropy GT — $\lambda = 1.0$ (variance blow-up, geometries agree)
-
-**Poincaré: 2.1632, var 5,135**  ·  **Lorentz: 2.1632, var 5,135**
-
-![w:340](ts_cmplx_ps1_pp_per1.0.jpg) ![w:340](ts_cmplx_ps1_lc_per1.0.jpg)
-
-Mean has drifted ~0.14 below target — slightly larger absolute gap than low-entropy.
-
----
-
-## High-Entropy GT — $\lambda = 2.0$ (biased low, tail under-sampled)
-
-**Poincaré: <r>1.8579</r>, var 36,502**  ·  **Lorentz: <r>1.8579</r>, var 36,502**
-
-![w:340](ts_cmplx_ps1_pp_per2.0.jpg) ![w:340](ts_cmplx_ps1_lc_per2.0.jpg)
-
-ELBO drops to **1.86 < CE = 2.30** — absolute gap **0.44** vs 0.32 in low-entropy: tail truncation **hurts more when entropy is higher**.
-
----
-
-## Cross-Entropy Comparison: Bias Scales with CE
-
-Absolute bias `|test_loss − test_ce|` at each $\lambda$ (Poincaré–Polar):
-
-| $\lambda$ | low-entropy bias | high-entropy bias |
+| $\lambda$ | IS-NELBO | IS-NELBO Var |
 |:--:|:--:|:--:|
-| unif | 0.166 | 0.246 |
-| 0.1  | **0.0001** | **0.0001** |
-| 0.2  | 0.0008 | 0.0035 |
-| 0.3  | 0.0009 | 0.0156 |
-| 0.4  | 0.0095 | 0.0114 |
-| 0.5  | 0.0018 | 0.0113 |
-| 0.8  | 0.2214 | 0.3822 |
-| 1.0  | 0.0789 | 0.1353 |
-| 2.0  | **0.3181** | **0.4406** |
+| unif $[0.01,10]$ | <r>1.5008</r> | 7.5 |
+| 0.01 | <r>NaN</r> | <r>NaN</r> |
+| **0.1**  | **1.6665** | **18.5** |
+| 0.2  | 1.6672 | 43.1 |
+| 0.4  | 1.6569 | 224.9 |
+| 0.5  | 1.6682 | 1,258 |
+| 0.8  | 1.8878 | 332,725 |
+| 1.0  | 1.5875 | 4,490 |
+| 2.0  | <r>1.3483</r> | 16,832 |
 
-Bias at small/well-chosen $\lambda$ is **entropy-invariant** ($\sim 10^{-4}$); bias at the failure regimes (unif, large $\lambda$) **grows with CE**.
+---
+
+## Low-Entropy — Lorentz–Cartesian
+
+| $\lambda$ | IS-NELBO | IS-NELBO Var |
+|:--:|:--:|:--:|
+| unif $[0.01,10]$ | <r>NaN</r> | <r>NaN</r> |
+| 0.01 – 0.5 | <r>NaN</r> | <r>NaN</r> |
+| 0.8  | 1.8878 | 332,725 |
+| 1.0  | 1.5875 | 4,490 |
+| 2.0  | <r>1.3483</r> | 16,832 |
+
+---
+
+## High-Entropy (`cmplx_ps1`, CE = 2.2985)
+
+---
+
+### High-Entropy — Poincaré–Polar
+
+| $\lambda$ | IS-NELBO | IS-NELBO Var |
+|:--:|:--:|:--:|
+| unif $[0.01,10]$ | <r>2.0530</r> | 7.5 |
+| 0.01 | <r>NaN</r> | <r>NaN</r> |
+| **0.1**  | **2.2984** | **22.7** |
+| 0.2  | 2.2950 | 42.8 |
+| 0.4  | 2.2871 | 562.6 |
+| 0.5  | 2.2872 | 1,996 |
+| 0.8  | 2.6807 | 904,924 |
+| 1.0  | 2.1632 | 5,135 |
+| 2.0  | <r>1.8579</r> | 36,502 |
+
+---
+
+## High-Entropy — Lorentz–Cartesian
+
+| $\lambda$ | IS-NELBO | IS-NELBO Var |
+|:--:|:--:|:--:|
+| unif $[0.01,10]$ | <r>NaN</r> | <r>NaN</r> |
+| 0.01 – 0.5 | <r>NaN</r> | <r>NaN</r> |
+| 0.8  | 2.6807 | 904,924 |
+| 1.0  | 2.1632 | 5,135 |
+| 2.0  | <r>1.8579</r> | 36,502 |
 
 ---
 
 ## Conclusion
 
-- **Optimal-model ELBO = CE at $\lambda = 0.1$ across entropies** (1.6665 vs 1.6664, 2.2984 vs 2.2985) — the estimator is **unbiased and entropy-agnostic** in the sweet spot.
-- **Three regimes are preserved across data entropies**: small $\lambda$ → NaN (Lorentz boundary); $\lambda \in [0.1, 0.5]$ → unbiased, low variance (Poincaré); $\lambda \ge 0.8$ → high variance and increasing low-bias from tail truncation.
-- **Variance scales with entropy**: at the same $\lambda$, the higher-entropy run has $\sim 1.2$–$3\times$ larger `test_loss_var` (e.g. $\lambda{=}0.5$: 1,258 vs 1,996; $\lambda{=}2.0$: 16,832 vs 36,502).
-- **Tail-truncation bias grows with entropy**: at $\lambda = 2.0$ the absolute gap is **0.32** for $H{=}1.67$ and **0.44** for $H{=}2.30$ — the bridge tail carries more mass when the target is broader.
-- **Uniform proposal is uniformly bad**: under-counts CE by 0.17 (low entropy) and 0.25 (high entropy); stratified exponential at $\lambda = 0.1$ is the right default.
-- **Lorentz still requires $\lambda \ge 0.8$** regardless of GT entropy — the NaN comes from `_lorentz_norm_sq`, not from the data distribution.
+- Best rate $\lambda = 0.1$ (Poincaré–Polar):
+
+- The uniform-proposal **biased lower** by 0.17–0.25 (truncated at $t = 10$) across low to high entropy dataset.
 
 ---
 

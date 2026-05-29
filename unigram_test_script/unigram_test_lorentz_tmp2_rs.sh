@@ -30,6 +30,7 @@ run_tmp2_opt() {
     +proposal_type=stratified_exp \
     "+proposal_exp_rate=${proposal_exp_rate}" \
     "+loss_geometry=${loss_geometry}" \
+    "+rotate_emb=False" \
     +hidden_size=128 \
     +depth=3 \
     +hyper_T=1000 \
@@ -45,12 +46,12 @@ for seed in "${seeds[@]}"; do
   run_tmp2_opt \
     "$seed" \
     "lorentz_cartesian" \
-    "lorentz_cartesian_opt_tmp_rlog_newd2_rot_ts4000000" \
+    "lorentz_cartesian_opt_tmp_rlog_newd2_ts4000000" \
     "1.0,0.1,0.01,0.2,0.3,0.8,0.5,2.0"
 
-  # run_tmp2_opt \
-  #   "$seed" \
-  #   "poincare_polar" \
-  #   "poincare_polar_opt_tmp_rlog_newd2_rot_ts4000000" \
-  #   "1.0,0.1,0.01,0.2,0.3,0.8,0.5,2.0"
+  run_tmp2_opt \
+    "$seed" \
+    "poincare_polar" \
+    "poincare_polar_opt_tmp_rlog_newd2_ts4000000" \
+    "1.0,0.1,0.01,0.2,0.3,0.8,0.5,2.0"
 done
