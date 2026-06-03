@@ -1,5 +1,6 @@
 import lightning as L
 import torch
+from omegaconf import ListConfig
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -60,48 +61,75 @@ class UnigramDataModule(L.LightningDataModule):
         self.train_dataset = None
         self.val_dataset = None
         self.test_dataset = None
-        print(f"Entropy: {self.entropy(self.config.ps)}")
+        # Resolve config.ps (a named string spec or an explicit list) into a
+        # concrete probability list, and pin the vocab size to its length.
+        self.ps = self.ps_generator()
+        self.vocab_size = len(self.ps)
+        print(f"Entropy: {self.entropy(self.ps)}")
 
     def entropy(self, ps):
         ps = process_ps(ps)
         return -(ps * torch.log(ps)).sum()
 
-    def ps_generator(self, config: dict):
-        ret_ps = None
-        ps_str = str(self.config.ps)
-        if isinstance(self.config.ps, str):
-            if ps_str == PS_NAIVE:
+    STRING_PS = (PS_NAIVE, PS_CMPLX, "cmplx_ps1", "c1e3_exp1.0", "c1e4_exp1.0", "c1e5_exp1.0")
+
+    @staticmethod
+    def _exp_decay_ps(n: int, lam: float = 1.0):
+        """Deterministic exponential decay: p_i proportional to exp(-lam * i),
+        i = 0..n-1, normalized to sum 1.
+
+        exp(-i) underflows to 0 for i >~ 100 (and 0 trips process_ps's
+        strictly-positive check / breaks log(ps) in OptimalModel), so the
+        negligible tail is floored to a tiny positive value and renormalized.
+        The floor (~1e-30) is far below any token that ever appears in the data,
+        so it does not materially change the distribution.
+        """
+        i = torch.arange(n, dtype=torch.float64)
+        p = torch.exp(-lam * i)
+        p = p / p.sum()
+        p = p.clamp_min(1e-30)
+        p = p / p.sum()
+        return p.tolist()
+
+    def ps_generator(self):
+        ps = self.config.ps
+        if isinstance(ps, str):
+            if ps == self.PS_NAIVE:
                 ret_ps = [0.91,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01]
-            elif ps_str == PS_CMPLX:
+            elif ps == self.PS_CMPLX:
                 ret_ps = [0.31,0.01,0.2,0.01,0.01,0.3,0.08,0.04,0.03,0.01]
-            elif ps_str == "cmplx_ps1":
+            elif ps == "cmplx_ps1":
                 ret_ps = [0.11,0.10,0.10,0.11,0.11,0.10,0.10,0.10,0.09,0.08]
-            elif ps_str == "c1e3_exp1.0":
-                # TODO: create a list with 100 item, the value of each item follows the exponential distribution with \lambda=1.0
-            elif ps_str == "c1e4_exp1.0":
-                # TODO: create a list with 1000 item, the value of each item follows the exponential distribution with \lambda=1.0
-            elif ps_str == "c1e5_exp1.0":
-                # TODO: create a list with 10000 item, the value of each item follows the exponential distribution with \lambda=1.0
+            elif ps == "c1e3_exp1.0":
+                ret_ps = self._exp_decay_ps(n=100, lam=1.0)
+            elif ps == "c1e4_exp1.0":
+                ret_ps = self._exp_decay_ps(n=1000, lam=1.0)
+            elif ps == "c1e5_exp1.0":
+                ret_ps = self._exp_decay_ps(n=10000, lam=1.0)
             else:
-                # TODO: Finish the error message
-                raise ValueError(f"config.ps, {ps_str}, is not supported, only support ")
-        elif isinstance(self.config.ps, (list, tuple)):
-            ret_ps = list(self.config.ps)
+                raise ValueError(
+                    f"config.ps={ps!r} is not a supported string spec; "
+                    f"expected one of {self.STRING_PS} or an explicit list of probabilities."
+                )
+        elif isinstance(ps, (list, tuple, ListConfig)):
+            ret_ps = [float(x) for x in ps]
         else:
-            # TODO: Finish the error message
-            raise ValueError(f"type of config.ps, {type(self.config.ps)} is not supported, only support ")
+            raise ValueError(
+                f"config.ps has unsupported type {type(ps).__name__}; "
+                f"expected a list of probabilities or one of the string specs {self.STRING_PS}."
+            )
         return ret_ps
 
     def setup(self, stage: str | None = None):
         del stage
         self.train_dataset = UnigramDataset(
-            size=self.config.train_size, ps=self.config.ps, seed=self.config.seed
+            size=self.config.train_size, ps=self.ps, seed=self.config.seed
         )
         self.val_dataset = UnigramDataset(
-            size=self.config.val_size, ps=self.config.ps, seed=self.config.seed + 1
+            size=self.config.val_size, ps=self.ps, seed=self.config.seed + 1
         )
         self.test_dataset = UnigramDataset(
-            size=self.config.test_size, ps=self.config.ps, seed=self.config.seed + 2
+            size=self.config.test_size, ps=self.ps, seed=self.config.seed + 2
         )
 
     def train_dataloader(self):

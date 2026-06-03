@@ -54,23 +54,23 @@ run_tmp4_tnb() {
 }
 
 # Primary run: learnable-embedding poincare_polar with an exponential proposal.
-run_tmp4_tnb \
-  "$seed" \
-  "poincare_polar" \
-  "poincare_polar_tnb_tmp4_learnemb_ts4000000_TEST" \
-  "4000000" \
-  "unif" \
-  "1.0" \
-  "1000,2000,3000,5000"
+# run_tmp4_tnb \
+#   "$seed" \
+#   "poincare_polar" \
+#   "poincare_polar_tnb_tmp4_learnemb_ts4000000_TEST" \
+#   "4000000" \
+#   "unif" \
+#   "1.0" \
+#   "1000,2000,3000,5000"
 
-run_tmp4_tnb \
-  "$seed" \
-  "poincare_polar" \
-  "poincare_polar_tnb_tmp4_learnemb_ts4000000_TEST" \
-  "4000000" \
-  "stratified_exp" \
-  "1.0,0.1,0.2,0.3,0.8,0.5" \
-  "1000"
+# run_tmp4_tnb \
+#   "$seed" \
+#   "poincare_polar" \
+#   "poincare_polar_tnb_tmp4_learnemb_ts4000000_TEST" \
+#   "4000000" \
+#   "stratified_exp" \
+#   "1.0,0.1,0.2,0.3,0.8,0.5" \
+#   "1000"
 
 run_tmp4_tnb_ce() {
   local seed="$1"
@@ -108,19 +108,163 @@ run_tmp4_tnb_ce() {
     "+postfix=rs${seed}"
 }
 
-run_tmp4_tnb_ce \
+# run_tmp4_tnb_ce \
+#   "$seed" \
+#   "cross_entropy" \
+#   "cross_entropy_tnb_tmp4_learnemb_ts4000000_TEST_HOROCYCLE" \
+#   "4000000" \
+#   "unif" \
+#   "1.0" \
+#   "1000,2000,3000,5000"
+
+# run_tmp4_tnb_ce \
+#   "$seed" \
+#   "cross_entropy" \
+#   "cross_entropy_tnb_tmp4_learnemb_ts4000000_TEST_HOROCYCLE" \
+#   "4000000" \
+#   "stratified_exp" \
+#   "1.0,0.1,0.2,0.3,0.8,0.5" \
+#   "1000"
+
+# run_tmp4_tnb_ce \
+#   "$seed" \
+#   "horo_cross_entropy" \
+#   "horo_cross_entropy_tnb_tmp4_learnemb_ts4000000_TEST" \
+#   "4000000" \
+#   "unif" \
+#   "1.0" \
+#   "1000,2000,3000,5000"
+
+# run_tmp4_tnb_ce \
+#   "$seed" \
+#   "horo_cross_entropy" \
+#   "horo_cross_entropy_tnb_tmp4_learnemb_ts4000000_TEST" \
+#   "4000000" \
+#   "stratified_exp" \
+#   "1.0,0.1,0.2,0.3,0.8,0.5" \
+#   "1000"
+
+run_tmp4_tnb_ce_ap() {
+  local seed="$1"
+  local loss_geometry="$2"
+  local sweep_name="$3"
+  local test_size="$4"
+  local proposal_type="$5"
+  local proposal_exp_rate="$6"
+  local hyper_T="$7"
+
+  python unigram/unigram_test2_tmp4.py -m \
+    hydra.job.chdir=true \
+    hydra.sweep.dir=outputs/unigram_test2 \
+    "hydra.sweep.subdir=${sweep_name}_rs${seed}" \
+    +mode=tnb \
+    +vocab_size=10 \
+    +hyper_dim=2 \
+    "+test_size=${test_size}" \
+    +max_steps=20000 \
+    +lr=1e-5 \
+    "+ps=${PS}" \
+    "+loss_proposal_type=${proposal_type}" \
+    "+loss_proposal_exp_rate=${proposal_exp_rate}" \
+    "+loss_geometry=${loss_geometry}" \
+    "+nelbo_proposal_type=${proposal_type}" \
+    "+nelbo_proposal_exp_rate=${proposal_exp_rate}" \
+    "+nelbo_geometry=poincare_polar" \
+    "+rotate_emb=True" \
+    +hidden_size=128 \
+    +depth=3 \
+    "+hyper_T=${hyper_T}" \
+    +hyper_dt=0.01 \
+    +loss_plot_ma_window=50 \
+    "+seed=${seed}" \
+    "+postfix=rs${seed}"
+}
+
+# run_tmp4_tnb_ce_ap \
+#   "$seed" \
+#   "cross_entropy" \
+#   "cross_entropy_tnb_tmp4_learnemb_ts4000000_TEST_AP" \
+#   "4000000" \
+#   "unif" \
+#   "1.0" \
+#   "1000,2000,3000,5000"
+
+# run_tmp4_tnb_ce_ap \
+#   "$seed" \
+#   "cross_entropy" \
+#   "cross_entropy_tnb_tmp4_learnemb_ts4000000_TEST_AP" \
+#   "4000000" \
+#   "stratified_exp" \
+#   "1.0,0.1,0.2,0.3,0.8,0.5" \
+#   "1000"
+
+# run_tmp4_tnb_ce_ap \
+#   "$seed" \
+#   "horo_cross_entropy" \
+#   "horo_cross_entropy_tnb_tmp4_learnemb_ts4000000_TEST_AP" \
+#   "4000000" \
+#   "unif" \
+#   "1.0" \
+#   "1000,2000,3000,5000"
+
+# run_tmp4_tnb_ce_ap \
+#   "$seed" \
+#   "horo_cross_entropy" \
+#   "horo_cross_entropy_tnb_tmp4_learnemb_ts4000000_TEST_AP" \
+#   "4000000" \
+#   "stratified_exp" \
+#   "1.0,0.1,0.2,0.3,0.8,0.5" \
+#   "1000"
+
+run_tmp4_tnb_ce_ap_horocycle() {
+  local seed="$1"
+  local loss_geometry="$2"
+  local sweep_name="$3"
+  local test_size="$4"
+  local proposal_type="$5"
+  local proposal_exp_rate="$6"
+  local hyper_T="$7"
+
+  python unigram/unigram_test2_tmp4.py -m \
+    hydra.job.chdir=true \
+    hydra.sweep.dir=outputs/unigram_test2 \
+    "hydra.sweep.subdir=${sweep_name}_rs${seed}" \
+    +mode=tnb \
+    +vocab_size=10 \
+    +hyper_dim=2 \
+    "+test_size=${test_size}" \
+    +max_steps=20000 \
+    +lr=1e-5 \
+    "+ps=${PS}" \
+    "+loss_proposal_type=${proposal_type}" \
+    "+loss_proposal_exp_rate=${proposal_exp_rate}" \
+    "+loss_geometry=${loss_geometry}" \
+    "+nelbo_proposal_type=${proposal_type}" \
+    "+nelbo_proposal_exp_rate=${proposal_exp_rate}" \
+    "+nelbo_geometry=poincare_polar_horocycle" \
+    "+rotate_emb=True" \
+    +hidden_size=128 \
+    +depth=3 \
+    "+hyper_T=${hyper_T}" \
+    +hyper_dt=0.01 \
+    +loss_plot_ma_window=50 \
+    "+seed=${seed}" \
+    "+postfix=rs${seed}"
+}
+
+run_tmp4_tnb_ce_ap_horocycle \
   "$seed" \
   "cross_entropy" \
-  "cross_entropy_tnb_tmp4_learnemb_ts4000000_TEST" \
+  "cross_entropy_tnb_tmp4_learnemb_ts4000000_TEST_AP_HOROCYCLE" \
   "4000000" \
   "unif" \
   "1.0" \
   "1000,2000,3000,5000"
 
-run_tmp4_tnb_ce \
+run_tmp4_tnb_ce_ap_horocycle \
   "$seed" \
   "cross_entropy" \
-  "cross_entropy_tnb_tmp4_learnemb_ts4000000_TEST" \
+  "cross_entropy_tnb_tmp4_learnemb_ts4000000_TEST_AP_HOROCYCLE" \
   "4000000" \
   "stratified_exp" \
   "1.0,0.1,0.2,0.3,0.8,0.5" \

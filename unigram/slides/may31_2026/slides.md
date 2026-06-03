@@ -226,6 +226,16 @@ $\times$ Learnable / Fixed Word Embedding
 
 ---
 
+## Experiment Set Up
+
+- Driver: `unigram/unigram_test2_tmp4.py` · script: `unigram_test_script/unigram_test_lorentz_tmp4_loss_emb.sh` · **seed = 42**
+- Vocab 10 · Data dist $[0.91,\ 0.01\times 9]$ · entropy $H \approx$ **0.5003**
+- Geometry: **Poincaré–Polar** · bridge horizon `hyper_T=1000`, `hyper_dt=0.01`
+- Proposal: **plain exponential** $p(t)=\lambda e^{-\lambda t}$, rate $\lambda \in \{0.01,0.1,0.2,0.3,0.5,0.8,1.0,2.0\}$
+- **test-set size:** $\{4\mathrm{e}4,\ 4\mathrm{e}5,\ 4\mathrm{e}6,\ 4\mathrm{e}7,\ 4\mathrm{e}8\}$
+
+---
+
 ## Conclusion
 
 

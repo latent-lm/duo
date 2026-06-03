@@ -121,6 +121,79 @@ def plot_loss_curves(
     plt.close(fig)
     return output_path
 
+
+def plot_embedding_concentration(
+    recorder,
+    output_path,
+    init_phis=None,
+    final_phis=None,
+    final_norms=None,
+):
+    """Visualize how the word embedding concentrates (collapses) over training.
+
+    Panels:
+      (a) emb_R           angular concentration in [0, 1]  (0 = spread, 1 = collapsed)
+      (b) emb_phi_min_gap smallest angle gap, log scale    (-> 0 = two words merging)
+      (c) emb_norm_*      row-norm spread                   (radius is discarded by the angle)
+      (d) polar scatter of the per-word angles phi_v        (initial vs final)
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig = plt.figure(figsize=(12, 9))
+
+    ax = fig.add_subplot(2, 2, 1)
+    s, v = recorder.get_series("emb_R")
+    if s:
+        ax.plot(s, v, color="C3", linewidth=2)
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_xlabel("step"); ax.set_ylabel("R")
+    ax.set_title("Angular concentration R  (0 = spread, 1 = collapsed)")
+    ax.grid(True, alpha=0.3)
+
+    ax = fig.add_subplot(2, 2, 2)
+    s, v = recorder.get_series("emb_phi_min_gap")
+    if s:
+        ax.plot(s, v, color="C1", linewidth=2)
+        ax.set_yscale("log")
+    ax.set_xlabel("step"); ax.set_ylabel("min gap (rad)")
+    ax.set_title("Smallest angle gap  (→ 0 = words merging)")
+    ax.grid(True, alpha=0.3, which="both")
+
+    ax = fig.add_subplot(2, 2, 3)
+    for name, c in (("emb_norm_min", "C0"), ("emb_norm_mean", "C2"), ("emb_norm_max", "C4")):
+        s, v = recorder.get_series(name)
+        if s:
+            ax.plot(s, v, label=name.replace("emb_norm_", ""), color=c, linewidth=1.8)
+    ax.set_xlabel("step"); ax.set_ylabel("||e_v||")
+    ax.set_title("Embedding row norms")
+    ax.grid(True, alpha=0.3); ax.legend()
+
+    ax = fig.add_subplot(2, 2, 4, projection="polar")
+    if init_phis is not None and len(init_phis):
+        ax.scatter(init_phis, np.ones(len(init_phis)), s=40,
+                   facecolors="none", edgecolors="0.6", label="init", zorder=2)
+    if final_phis is not None and len(final_phis):
+        r = np.asarray(final_norms, dtype=float) if final_norms is not None else np.ones(len(final_phis))
+        r = r / (r.max() + 1e-12)
+        ax.scatter(final_phis, r, s=50, c="C3", label="final", zorder=3)
+    ax.set_rticks([])
+    ax.set_title("Word angles φ_v  (init ring vs final)")
+    if (init_phis is not None) or (final_phis is not None):
+        ax.legend(loc="upper right", bbox_to_anchor=(1.18, 1.12))
+
+    fig.suptitle("Word-embedding concentration during training", fontsize=14)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    return output_path
+
 class DataMgr:
     def __init__(self, folder: str):
         self.folder = Path(folder)

@@ -91,7 +91,7 @@ run_direct() {
     +loss_geometry=cross_entropy \
     +nelbo_proposal_type=stratified_exp \
     +nelbo_proposal_exp_rate=0.1 \
-    +nelbo_geometry=poincare_polar \
+    +nelbo_geometry=poincare_polar_horocycle \
     "+rotate_emb=True" \
     +hidden_size=128 \
     +depth=3 \
@@ -173,7 +173,7 @@ run_direct_align() {
     +loss_geometry=cross_entropy \
     +nelbo_proposal_type=${proposal_type} \
     +nelbo_proposal_exp_rate=${proposal_exp_rate} \
-    +nelbo_geometry=poincare_polar \
+    +nelbo_geometry=poincare_polar_horocycle \
     "+rotate_emb=True" \
     +hidden_size=128 \
     +depth=3 \
