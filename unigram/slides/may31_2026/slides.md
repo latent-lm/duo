@@ -228,17 +228,73 @@ $\times$ Learnable / Fixed Word Embedding
 
 ## Experiment Set Up
 
-- Driver: `unigram/unigram_test2_tmp4.py` · script: `unigram_test_script/unigram_test_lorentz_tmp4_loss_emb.sh` · **seed = 42**
-- Vocab 10 · Data dist $[0.91,\ 0.01\times 9]$ · entropy $H \approx$ **0.5003**
-- Geometry: **Poincaré–Polar** · bridge horizon `hyper_T=1000`, `hyper_dt=0.01`
-- Proposal: **plain exponential** $p(t)=\lambda e^{-\lambda t}$, rate $\lambda \in \{0.01,0.1,0.2,0.3,0.5,0.8,1.0,2.0\}$
-- **test-set size:** $\{4\mathrm{e}4,\ 4\mathrm{e}5,\ 4\mathrm{e}6,\ 4\mathrm{e}7,\ 4\mathrm{e}8\}$
+- Driver `unigram/unigram_test2_tmp4.py` · script `unigram_test_lorentz_tmp4_loss_emb.sh` · `mode=tnb` (trains) · **seed 42** · 4M test
+- Vocab 10 · data $[0.91,\ 0.01\times 9]$ · entropy $H \approx$ **0.5003**
+- **Parametrization:** Horocycle $=$ `horo_cross_entropy` $\big(\mu=\mathrm{softmax}(f(z)+\text{horosphere})\big)$ vs Direct $=$ `cross_entropy` $\big(\mu=\mathrm{softmax}(f(z))\big)$
+- **Word embedding:** Learnable $\big(\phi_v=\mathrm{atan2}(e_v)$, `trainable_word_embedding=True`$\big)$ vs Fixed $\big($equally spaced $(v{+}0.5)\,2\pi/V\big)$
+- **Proposal swept, ELBO eval $=$ same proposal as loss:** `unif` $\times$ `hyper_T`$\in\{1000,2000,3000,5000\}$ and `stratified_exp` $\times\ \lambda\in\{1.0,0.1,0.2,0.3,0.8,0.5\}$
+
+---
+
+## Results — the 2×2 at a glance
+
+| | **Learnable emb** | **Fixed emb** |
+|---|---|---|
+| **Horocycle** (horo-CE) | <r>**NaN — diverges (all 10)**</r> | finite · `wnelbo` **0.33–0.95** |
+| **Direct** (CE) | finite · `ce` 0.22–1.98 · `wnelbo` 0.68–77 | finite · $\approx$ Learnable |
+
+- **Learnable embedding breaks Horocycle** (back-prop through the singular $\log(1-\cos(\theta-\phi_v))$ via $\phi_v$) but is **harmless for Direct** — Direct Learnable $\approx$ Fixed.
+- **Horocycle $\times$ Fixed** is the only well-behaved bridge ELBO (`test_wnelbo` $\approx 0.33$–$0.47$, low variance on `unif`).
+- **Direct (CE)** is a strong *denoiser* (low conditional `test_ce` on `unif`) but a poor *ELBO* estimator (large, heavy-tailed `test_wnelbo`).
+
+---
+
+## Horocycle (`horo_cross_entropy`)
+
+**$\times$ Learnable:** `test_ce` $=$ `test_wnelbo` $=$ <r>**NaN**</r> for **every** proposal — the loss differentiates $\log(1-\cos(\theta-\phi_v))$ through the learnable $\phi_v$.
+
+**$\times$ Fixed** — `test_ce` $\pm$ std · `test_wnelbo` $\pm$ std:
+
+| proposal | test_ce | test_wnelbo |
+|---|--:|--:|
+| unif hT=1000 | 0.441 ± 1.09 | **0.330** ± 1.67 |
+| unif hT=2000 | 0.475 ± 1.02 | 0.383 ± 2.58 |
+| unif hT=3000 | 0.536 ± 0.96 | 0.392 ± 3.22 |
+| unif hT=5000 | 0.679 ± 0.85 | 0.394 ± 4.21 |
+| strat λ=0.1 | 0.478 ± 1.06 | 0.402 ± 2.65 |
+| strat λ=0.2 | 0.446 ± 1.19 | 0.409 ± 3.82 |
+| strat λ=0.3 | 0.429 ± 1.29 | 0.417 ± 5.52 |
+| strat λ=0.5 | 0.478 ± 1.31 | 0.472 ± 11.3 |
+| strat λ=0.8 | 0.677 ± 1.12 | 0.628 ± 15.9 |
+| strat λ=1.0 | 1.085 ± 0.88 | 0.953 ± 15.7 |
+
+---
+
+## Direct (`cross_entropy`) — Learnable $\approx$ Fixed
+
+| proposal | ce (Learn) | ce (Fixed) | wnelbo (Learn) | wnelbo (Fixed) |
+|---|--:|--:|--:|--:|
+| unif hT=1000 | 0.340 | 0.316 | 0.684 | 0.721 |
+| unif hT=2000 | 0.283 | 0.262 | 1.308 | 1.380 |
+| unif hT=3000 | 0.251 | 0.238 | 1.879 | 2.008 |
+| unif hT=5000 | 0.222 | 0.217 | 2.981 | 3.256 |
+| strat λ=0.1 | 1.958 | 1.984 | 77.2 | 79.2 |
+| strat λ=0.2 | 1.967 | 1.981 | 31.0 | 32.7 |
+| strat λ=0.3 | 1.976 | 1.979 | 20.0 | 21.7 |
+| strat λ=0.5 | 1.982 | 1.979 | 11.2 | 12.7 |
+| strat λ=0.8 | 1.984 | 1.981 | 6.18 | 7.61 |
+| strat λ=1.0 | 1.985 | 1.982 | 4.58 | 5.93 |
+
+- `ce_std`: $\approx$ 0.8–1.2 (`unif`), $\approx$ 0.18–0.26 (`stratified`, small $\Rightarrow$ <r>confidently wrong</r>).
+- `wnelbo_std`: **huge on stratified** ($\approx$ 75–1130) $\Rightarrow$ heavy-tailed, unreliable ELBO.
 
 ---
 
 ## Conclusion
 
-
+- **Trainable embedding destabilizes only the Horocycle loss** $\Rightarrow$ NaN (it differentiates $\log(1-\cos(\theta-\phi_v))$ through $\phi_v$). **Direct (CE) is indifferent** to learnable vs fixed — no singular kernel in its loss, so Learnable $\approx$ Fixed.
+- **Fixed-embedding Horocycle** is the only setting with a sensible, low-variance bridge ELBO (`test_wnelbo` $\approx 0.33$–$0.47$).
+- **Direct (CE)** wins on conditional `test_ce` (denoising, beats $H$ on `unif`) but is a poor, heavy-tailed ELBO estimator; its `stratified` `test_ce` plateaus at $\approx 1.98 \approx 4H$ ("confidently wrong").
 
 ---
 
