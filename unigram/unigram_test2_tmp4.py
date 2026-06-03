@@ -340,7 +340,7 @@ class HyperBridge:
         return (d - 1) ** 2 / 2 * HyperBridge._lorentz_norm_sq(residual)
 
     @staticmethod
-    def binary_bridge_loss_horo_crossentropy(logits, targets, rhos, thetas):
+    def binary_bridge_loss_horo_crossentropy(logits, targets, rhos, thetas, word_embedding=None):
         (N,) = targets.shape
         (N,V) = logits.shape
         device = rhos.device
@@ -349,10 +349,6 @@ class HyperBridge:
         assert(targets.dtype == torch.int64)
         assert(rhos.dtype == torch.float64)
         assert(thetas.dtype == torch.float64)
-        # construct phis
-        # phis = (
-        #     torch.arange(V, device=device, dtype=torch.float64) + 0.5
-        # ) * (2 * torch.pi / V)
         # phi_v for every vocab word: learnable embedding angles when given,
         # otherwise the equally spaced points used by the *_old variant.
         phis = HyperBridge._vocab_angles(
@@ -361,15 +357,16 @@ class HyperBridge:
             dtype=torch.float64,
             word_embedding=word_embedding,
         )
-        # first, we get the horosphere distances
+        # horosphere distances (the Busemann/Poisson term added to the logits)
         alphas = thetas[:,None] - phis[None,:]  # angular offsets between z and v
         cos_alphas = alphas.cos()
-        sin_alphas = alphas.sin()
         log_two = torch.log(torch.tensor(2.0, device=device, dtype=torch.float64))
         horosphere_dists = log_two - torch.logaddexp((1 - cos_alphas).log() + rhos[:,None], (1 + cos_alphas).log() - rhos[:,None])
-        # remake mu and subtract the target
-        mu = (horosphere_dists + logits.to(torch.float64)).softmax(-1)
-        return torch.nn.functional.cross_entropy(mu, targets, reduction='none')
+        # cross-entropy on the horosphere-augmented logits (pass logits, NOT the
+        # softmaxed probabilities — cross_entropy applies log_softmax internally).
+        return torch.nn.functional.cross_entropy(
+            horosphere_dists + logits.to(torch.float64), targets, reduction='none'
+        )
 
     @staticmethod
     def binary_bridge_loss_crossentropy(logits, targets, rhos, thetas):
@@ -408,6 +405,7 @@ class HyperBridge:
                 targets=targets,
                 rhos=rhos,
                 thetas=thetas,
+                word_embedding=word_embedding,
             )
         elif loss_geometry == LossGeometry.CROSS_ENTROPY:
             bridge = HyperBridge.binary_bridge_loss_crossentropy(
@@ -648,7 +646,11 @@ class HyperbolicDLM(L.LightningModule):
             raise ValueError(f"config.loss_geometry, {self.loss_geometry}, shouldn't be None")
         self.model_input_dim: int = self.hyper_dim
         self.mode = config.get("mode", None)
-        
+        # If False, the per-word boundary angles phi_v are fixed equally-spaced
+        # ((v+0.5)*2*pi/V) instead of learned; the lm-head still trains as the logit
+        # readout. See the word_embedding property.
+        self.trainable_word_embedding = bool(config.get("trainable_word_embedding", None))
+
         if "lorentz" in self.loss_geometry:
             self.model_input_dim = self.hyper_dim + 1
 
@@ -672,9 +674,13 @@ class HyperbolicDLM(L.LightningModule):
 
     @property
     def word_embedding(self) -> Optional[torch.Tensor]:
-        # Learnable boundary embedding (lm-head weights, shape (V, hyper_dim)) when
-        # the backbone has one; None otherwise (e.g. OptimalModel), in which case
-        # the bridge and loss fall back to equally spaced points on the circle.
+        # Learnable boundary embedding (lm-head weights, shape (V, hyper_dim)) used to
+        # define each word's boundary angle phi_v = atan2(e_v). Returns None — so the
+        # bridge and loss fall back to fixed equally-spaced angles — when the backbone
+        # has no such table (e.g. OptimalModel) OR when trainable_word_embedding is
+        # False (the lm-head still trains as the logit readout in that case).
+        if not self.trainable_word_embedding:
+            return None
         head = getattr(self.model, "lm_head", None)
         return head.weight if head is not None else None
 
@@ -1302,6 +1308,7 @@ def main(cfg: DictConfig) -> None:
             "nelbo_proposal_exp_rate": 1.0,
             "nelbo_geometry": "poincare_polar",
             "rotate_emb": False,
+            "trainable_word_embedding": True,
             "lr": 1e-5,
             "ps": [0.91, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01],
             # "ps": [0.1] * 10,
