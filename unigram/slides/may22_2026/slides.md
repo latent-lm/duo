@@ -227,7 +227,7 @@ $$
 
 ---
 
-## `test_wnelbo` Results
+## IS-NELBO Results (`test_wnelbo`)
 
 | proposal | <r>CE-trained</r> | <b>PP-trained</b> | CE / PP |
 |:--:|:--:|:--:|:--:|
@@ -243,7 +243,7 @@ $$
 
 ---
 
-## `test_ce` — Cross-Entropy
+## Cross-Entropy Results (`test_ce`)
 
 | proposal | <r>CE-trained</r> | <b>PP-trained</b> | winner |
 |:--:|:--:|:--:|:--:|
@@ -280,16 +280,6 @@ The proposal weight (=  1 / propsal density) grows exponentially as time goes up
 - Exp(1.0)
 
 ![w:300 center](image-2.png)
-
----
-
-# Next Steps
-
-- Visualize the cross entropy loss across various timestep, see if the loss value is invariant across timesteps
-- Try Unif with larger timestep range
-- Set up trainable word embedding and compare with fixed word embedding
-- Enlarge the vocab size and more complicated distribution
-- Implement high-dim Hyperbolic heat kernel and posterior
 
 ---
 
@@ -388,7 +378,7 @@ Lorentz is **far more fragile**: every $\lambda \le 0.5$ collapses to NaN.
 
 ---
 
-<!-- ## Stratified-Exp Proposal — NELBO, IS+NELBO, and Proposal Weight Visualization
+## Stratified-Exp Proposal — NELBO, IS+NELBO, and Proposal Weight Visualization
 
 ---
 
@@ -548,7 +538,7 @@ The story across $\lambda$: NaN regime → stable regime → variance blow-up �
 
 ## Conclusion
 
-- Don't know why the visualized Lorentz per-sample estimate seem to have smaller variance than Poincare. They should be identical -->
+- Don't know why the visualized Lorentz per-sample estimate seem to have smaller variance than Poincare. They should be identical
 
 ---
 
@@ -674,3 +664,10 @@ A good $\lambda$ is **(1)** NaN-free, **(2)** unbiased (mean $\approx$ target CE
 
 ---
 
+# Next Steps
+
+- Visualize the cross entropy loss across various timestep, see if the loss value is invariant across timesteps
+- Try Unif with larger timestep range
+- Set up trainable word embedding and compare with fixed word embedding
+- Enlarge the vocab size and more complicated distribution
+- Implement high-dim Hyperbolic heat kernel and posterior

@@ -84,50 +84,25 @@ run_tmp3_opt \
   "1.0" \
   "1e7"
 
-run_tmp3_opt \
-  "$seed" \
-  "poincare_polar" \
-  "poincare_polar_opt_tmp3_rlog_newd2_rot_ts4e4" \
-  "4e4" \
-  "exp" \
-  "1.0,0.1,0.01,0.2,0.3,0.8,0.5,2.0" \
-  "1000"
+# Run the DIAGONAL of the (loss_rate x nelbo_rate) grid: one Hydra job per rate, so
+# loss_proposal_exp_rate == nelbo_proposal_exp_rate in every run. Passing the comma
+# list to `-m` instead cross-products the two axes (8x8=64 jobs); because the leaf
+# folder is named by the loss rate only, every surviving leaf would run nelbo_rate=1.0.
+exp_rates=(1.0 0.1 0.01 0.2 0.3 0.8 0.5 2.0)
 
-run_tmp3_opt \
-  "$seed" \
-  "poincare_polar" \
-  "poincare_polar_opt_tmp3_rlog_newd2_rot_ts4e5" \
-  "4e5" \
-  "exp" \
-  "1.0,0.1,0.01,0.2,0.3,0.8,0.5,2.0" \
-  "1000"
-
-run_tmp3_opt \
-  "$seed" \
-  "poincare_polar" \
-  "poincare_polar_opt_tmp3_rlog_newd2_rot_ts4e6" \
-  "4e6" \
-  "exp" \
-  "1.0,0.1,0.01,0.2,0.3,0.8,0.5,2.0" \
-  "1000"
-
-run_tmp3_opt \
-  "$seed" \
-  "poincare_polar" \
-  "poincare_polar_opt_tmp3_rlog_newd2_rot_ts4e7" \
-  "4e7" \
-  "exp" \
-  "1.0,0.1,0.01,0.2,0.3,0.8,0.5,2.0" \
-  "1000"
-
-run_tmp3_opt \
-  "$seed" \
-  "poincare_polar" \
-  "poincare_polar_opt_tmp3_rlog_newd2_rot_ts4e8" \
-  "4e8" \
-  "exp" \
-  "1.0,0.1,0.01,0.2,0.3,0.8,0.5,2.0" \
-  "1000"
+# for ts in 4e4 4e5 4e6 4e7 4e8; do
+for ts in 4e8 4e7 4e6 4e5 4e4; do
+  for er in "${exp_rates[@]}"; do
+    run_tmp3_opt \
+      "$seed" \
+      "poincare_polar" \
+      "poincare_polar_opt_tmp3_rlog_newd2_rot_ts${ts}_diag" \
+      "${ts}" \
+      "exp" \
+      "${er}" \
+      "1000"
+  done
+done
 
 # run_tmp3_tnb() {
 #   local seed="$1"

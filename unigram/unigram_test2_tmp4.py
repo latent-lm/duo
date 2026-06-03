@@ -15,11 +15,11 @@ import lightning as L
 try:
     from unigram.model import MLPLM, OptimalModel, polar_to_cart, vocab_points
     from unigram.dataset import UnigramDataModule, process_ps
-    from unigram.visualizer import DataMgr, Recorder
+    from unigram.visualizer import DataMgr, Recorder, plot_embedding_concentration
 except ModuleNotFoundError:
     from model import MLPLM, OptimalModel, polar_to_cart, vocab_points
     from dataset import UnigramDataModule, process_ps
-    from visualizer import DataMgr, Recorder
+    from visualizer import DataMgr, Recorder, plot_embedding_concentration
 
 def isnan_or_inf(x):
     return torch.logical_or(torch.isnan(x), torch.isinf(x))
@@ -27,6 +27,7 @@ def isnan_or_inf(x):
 @dataclass
 class LossGeometry:
     POINCARE_POLAR: str = "poincare_polar"
+    POINCARE_POLAR_HOROCYCLE: str = "poincare_polar_horocycle"
     POINCARE_CARTESIAN: str = "poincare_cartesian"
     LORENTZ_POLAR: str = "lorentz_polar"
     LORENTZ_CARTESIAN: str = "lorentz_cartesian"
@@ -61,8 +62,7 @@ class HyperBridge:
         return chi2.sqrt().reshape(nshape)
 
     @staticmethod
-    @torch.no_grad()
-    def binary_bridge(ts):
+    def binary_bridge_old(ts):
         ns = torch.poisson(ts/8).to(torch.int64)
         ss = ts.sqrt() * HyperBridge.sample_chi(2*ns+3, ts.dtype)
         vs = torch.rand_like(ts)
@@ -72,7 +72,69 @@ class HyperBridge:
         return (ps,thetas)
 
     @staticmethod
-    @torch.no_grad()
+    def _vocab_angles(
+        vocab_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        word_embedding: Optional[torch.FloatTensor] = None,
+    ):
+        # Boundary angle phi_v for every vocabulary word v.
+        #   word_embedding given : direction of each word's 2-D embedding. atan2
+        #     is scale-invariant, so the L2-normalization is a no-op for the angle
+        #     and only guards against overflow.
+        #   word_embedding None  : equally spaced points (v + 0.5) * 2*pi / V.
+        if word_embedding is None:
+            return (
+                torch.arange(vocab_size, device=device, dtype=dtype) + 0.5
+            ) * (2 * torch.pi / vocab_size)
+        e = word_embedding.to(dtype)
+        e = e / e.norm(dim=-1, p=2, keepdim=True)
+        return torch.atan2(e[..., 1], e[..., 0])
+
+    @staticmethod
+    def rotate_with_target(
+        thetas: torch.FloatTensor,
+        targets: torch.LongTensor,
+        vocab_size: int,
+        word_embedding: Optional[torch.FloatTensor] = None,
+    ):
+        # Rotate the spike (at angle 0) onto each target word's boundary angle,
+        # using the same word->angle map the loss uses (see _vocab_angles).
+        phis = HyperBridge._vocab_angles(
+            vocab_size=vocab_size,
+            device=thetas.device,
+            dtype=thetas.dtype,
+            word_embedding=word_embedding,
+        )
+        return thetas + phis[targets]
+
+    @staticmethod
+    def binary_bridge(
+        ts,
+        targets: torch.LongTensor,
+        vocab_size: int,
+        word_embedding: Optional[torch.FloatTensor] = None,
+    ):
+        # Radial sampling
+        ns = torch.poisson(ts/8).to(torch.int64)
+        ss = ts.sqrt() * HyperBridge.sample_chi(2*ns+3, ts.dtype)
+        vs = torch.rand_like(ts)
+        ps = torch.acosh(vs.square() + (1-vs.square())*torch.cosh(ss))
+
+        # Free angles
+        us = torch.rand_like(ts)
+        # Spike angle on 0
+        thetas = 2 * torch.atan((-ps).exp() * torch.tan(torch.pi * (us - 0.5)))
+
+        thetas = HyperBridge.rotate_with_target(
+            thetas=thetas,
+            targets=targets,
+            vocab_size=vocab_size,
+            word_embedding=word_embedding,
+        )
+        return ps, thetas
+
+    @staticmethod
     def polar_to_lorentz(rhos, thetas):
         sinh_r = torch.sinh(rhos)
         return torch.stack(
@@ -81,7 +143,6 @@ class HyperBridge:
         )
 
     @staticmethod
-    @torch.no_grad()
     def binary_bridge_lorentz(ts):
         rhos, thetas = HyperBridge.binary_bridge(ts)
         return HyperBridge.polar_to_lorentz(rhos, thetas)
@@ -92,7 +153,7 @@ class HyperBridge:
     # rhos          (N,)      float64
     # thetas        (N,)      float64
     @staticmethod
-    def binary_bridge_loss_poincare_disk_polar(logits, targets, rhos, thetas):
+    def binary_bridge_loss_poincare_disk_polar_old(logits, targets, rhos, thetas):
         (N,) = targets.shape
         (N,V) = logits.shape
         device = rhos.device
@@ -113,6 +174,82 @@ class HyperBridge:
         horosphere_dists = log_two - torch.logaddexp((1 - cos_alphas).log() + rhos[:,None], (1 + cos_alphas).log() - rhos[:,None])
         # remake mu and subtract the target
         mu = (horosphere_dists + logits.to(torch.float64)).softmax(-1)
+        mu = mu - torch.nn.functional.one_hot(targets,V).to(torch.float64)
+        # next, we transform the angles alpha after motion by rho
+        betas = torch.atan2(sin_alphas, rhos.cosh()[:,None] * cos_alphas - rhos.sinh()[:,None])
+        cos_errors = (betas.cos() * mu).sum(-1)
+        sin_errors = (betas.sin() * mu).sum(-1)
+        return (cos_errors.square() + sin_errors.square())/2
+
+    @staticmethod
+    def binary_bridge_loss_poincare_disk_polar(logits, targets, rhos, thetas, word_embedding=None):
+        (N,) = targets.shape
+        (N,V) = logits.shape
+        device = rhos.device
+        assert(rhos.shape == (N,))
+        assert(thetas.shape == (N,))
+        assert(targets.dtype == torch.int64)
+        assert(rhos.dtype == torch.float64)
+        assert(thetas.dtype == torch.float64)
+        assert word_embedding is None or tuple(word_embedding.shape) == (V, 2)
+        # phi_v for every vocab word: learnable embedding angles when given,
+        # otherwise the equally spaced points used by the *_old variant.
+        phis = HyperBridge._vocab_angles(
+            vocab_size=V,
+            device=device,
+            dtype=torch.float64,
+            word_embedding=word_embedding,
+        )
+        # first, we get the horosphere distances
+        # print(f"thetas ({thetas.mean().item()}): {torch.isfinite(thetas).all().item()}")
+        # print(f"phis ({phis.mean().item()}): {torch.isfinite(phis).all().item()}")
+        alphas = thetas[:,None] - phis[None,:]  # angular offsets between z and v
+        # print(f"alphas: {torch.isfinite(alphas).all().item()}")
+        cos_alphas = alphas.cos()
+        sin_alphas = alphas.sin()
+        log_two = torch.log(torch.tensor(2.0, device=device, dtype=torch.float64))
+        # print(f"cos_alphas ({cos_alphas.mean().item()}): {torch.isfinite(cos_alphas).all().item()}")
+        # print(f"sin_alphas ({sin_alphas.mean().item()}): {torch.isfinite(sin_alphas).all().item()}")
+        # print(f"1 - cos_alphas ({(1 - cos_alphas).mean().item()}): {torch.isfinite(1 - cos_alphas).all().item()}")
+        # print(f"1 + cos_alphas ({(1 + cos_alphas).mean().item()}): {torch.isfinite(1 + cos_alphas).all().item()}")
+        horosphere_dists = log_two - torch.logaddexp((1 - cos_alphas).log() + rhos[:,None], (1 + cos_alphas).log() - rhos[:,None])
+        # remake mu and subtract the target
+        mu = (horosphere_dists + logits.to(torch.float64)).softmax(-1)
+        mu = mu - torch.nn.functional.one_hot(targets,V).to(torch.float64)
+        # next, we transform the angles alpha after motion by rho
+        betas = torch.atan2(sin_alphas, rhos.cosh()[:,None] * cos_alphas - rhos.sinh()[:,None])
+        cos_errors = (betas.cos() * mu).sum(-1)
+        sin_errors = (betas.sin() * mu).sum(-1)
+        return (cos_errors.square() + sin_errors.square())/2
+
+    @staticmethod
+    def binary_bridge_loss_poincare_disk_polar_horocycle(logits, targets, rhos, thetas, word_embedding=None):
+        (N,) = targets.shape
+        (N,V) = logits.shape
+        device = rhos.device
+        assert(rhos.shape == (N,))
+        assert(thetas.shape == (N,))
+        assert(targets.dtype == torch.int64)
+        assert(rhos.dtype == torch.float64)
+        assert(thetas.dtype == torch.float64)
+        assert word_embedding is None or tuple(word_embedding.shape) == (V, 2)
+        # phi_v for every vocab word: learnable embedding angles when given,
+        # otherwise the equally spaced points used by the *_old variant.
+        phis = HyperBridge._vocab_angles(
+            vocab_size=V,
+            device=device,
+            dtype=torch.float64,
+            word_embedding=word_embedding,
+        )
+        # first, we get the horosphere distances
+        # print(f"thetas ({thetas.mean().item()}): {torch.isfinite(thetas).all().item()}")
+        # print(f"phis ({phis.mean().item()}): {torch.isfinite(phis).all().item()}")
+        alphas = thetas[:,None] - phis[None,:]  # angular offsets between z and v
+        # print(f"alphas: {torch.isfinite(alphas).all().item()}")
+        cos_alphas = alphas.cos()
+        sin_alphas = alphas.sin()
+        # remake mu and subtract the target
+        mu = logits.to(torch.float64).softmax(-1)
         mu = mu - torch.nn.functional.one_hot(targets,V).to(torch.float64)
         # next, we transform the angles alpha after motion by rho
         betas = torch.atan2(sin_alphas, rhos.cosh()[:,None] * cos_alphas - rhos.sinh()[:,None])
@@ -213,9 +350,17 @@ class HyperBridge:
         assert(rhos.dtype == torch.float64)
         assert(thetas.dtype == torch.float64)
         # construct phis
-        phis = (
-            torch.arange(V, device=device, dtype=torch.float64) + 0.5
-        ) * (2 * torch.pi / V)
+        # phis = (
+        #     torch.arange(V, device=device, dtype=torch.float64) + 0.5
+        # ) * (2 * torch.pi / V)
+        # phi_v for every vocab word: learnable embedding angles when given,
+        # otherwise the equally spaced points used by the *_old variant.
+        phis = HyperBridge._vocab_angles(
+            vocab_size=V,
+            device=device,
+            dtype=torch.float64,
+            word_embedding=word_embedding,
+        )
         # first, we get the horosphere distances
         alphas = thetas[:,None] - phis[None,:]  # angular offsets between z and v
         cos_alphas = alphas.cos()
@@ -231,7 +376,7 @@ class HyperBridge:
         return torch.nn.functional.cross_entropy(logits, targets, reduction='none')
 
     @staticmethod
-    def weighted_binary_loss(logits, targets, rhos, thetas, proposal_weight, loss_geometry="poincare_polar"):
+    def weighted_binary_loss(logits, targets, rhos, thetas, proposal_weight, word_embedding=None, loss_geometry="poincare_polar"):
         if loss_geometry == LossGeometry.POINCARE_POLAR:
             # print("Use POINCARE_POLAR")
             bridge = HyperBridge.binary_bridge_loss_poincare_disk_polar(
@@ -239,6 +384,7 @@ class HyperBridge:
                 targets=targets,
                 rhos=rhos,
                 thetas=thetas,
+                word_embedding=word_embedding,
             )
         elif loss_geometry == LossGeometry.POINCARE_CARTESIAN:
             # print("Use POINCARE_CARTESIAN")
@@ -275,14 +421,22 @@ class HyperBridge:
         return bridge * proposal_weight.to(dtype=bridge.dtype), bridge
 
     @staticmethod
-    def weighted_binary_nelbo(logits, targets, rhos, thetas, proposal_weight, loss_geometry="poincare_polar"):
+    def weighted_binary_nelbo(logits, targets, rhos, thetas, proposal_weight, word_embedding=None, loss_geometry="poincare_polar"):
         if loss_geometry == LossGeometry.POINCARE_POLAR:
-            # print("Use POINCARE_POLAR")
             bridge = HyperBridge.binary_bridge_loss_poincare_disk_polar(
                 logits=logits,
                 targets=targets,
                 rhos=rhos,
                 thetas=thetas,
+                word_embedding=word_embedding,
+            )
+        elif loss_geometry == LossGeometry.POINCARE_POLAR_HOROCYCLE:
+            bridge = HyperBridge.binary_bridge_loss_poincare_disk_polar_horocycle(
+                logits=logits,
+                targets=targets,
+                rhos=rhos,
+                thetas=thetas,
+                word_embedding=word_embedding,
             )
         elif loss_geometry == LossGeometry.POINCARE_CARTESIAN:
             # print("Use POINCARE_CARTESIAN")
@@ -516,6 +670,131 @@ class HyperbolicDLM(L.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=float(self.config.lr))
 
+    @property
+    def word_embedding(self) -> Optional[torch.Tensor]:
+        # Learnable boundary embedding (lm-head weights, shape (V, hyper_dim)) when
+        # the backbone has one; None otherwise (e.g. OptimalModel), in which case
+        # the bridge and loss fall back to equally spaced points on the circle.
+        head = getattr(self.model, "lm_head", None)
+        return head.weight if head is not None else None
+
+    @torch.no_grad()
+    def _record_embedding_concentration(self, step: int) -> None:
+        """Track how concentrated the learnable word embedding becomes.
+
+        The loss sees the embedding only through its boundary angle
+        phi_v = atan2(e_v), so concentration is measured on the circle:
+          - emb_R         mean resultant length ||mean unit-vector|| in [0, 1];
+                          0 = angles uniformly spread, 1 = all collapsed to one angle.
+          - emb_circ_std  circular std sqrt(-2 ln R) (rad); small = concentrated.
+          - emb_phi_min_gap  smallest wrap-around gap between adjacent angles (rad);
+                          small = two words' angles merging.
+          - emb_norm_{min,mean,max}  radial spread of the rows (the angle discards it).
+        No-op when there is no learnable embedding (e.g. OptimalModel).
+        """
+        we = self.word_embedding
+        if we is None:
+            return
+        e = we.detach().to(torch.float64)
+        norms = e.norm(dim=-1)
+        u = e / norms.clamp_min(1e-12).unsqueeze(-1)              # unit (cos phi, sin phi)
+        R = u.mean(dim=0).norm()
+        circ_std = torch.sqrt((-2.0 * R.clamp_min(1e-12).log()).clamp_min(0.0))
+        metrics = {
+            "emb_R": R,
+            "emb_circ_std": circ_std,
+            "emb_norm_min": norms.min(),
+            "emb_norm_mean": norms.mean(),
+            "emb_norm_max": norms.max(),
+        }
+        phis = torch.atan2(u[:, 1], u[:, 0])
+        if not hasattr(self, "_init_phis"):
+            self._init_phis = phis.clone()                       # snapshot for the before/after plot
+        # Strided trajectory snapshots (first 2 dims) for the Poincaré-disk animation.
+        if not hasattr(self, "_emb_snapshots"):
+            self._emb_snapshots = []
+            self._emb_snap_every = max(1, int(float(self.config.get("max_steps", 1))) // 300)
+        if step == 1 or step % self._emb_snap_every == 0:
+            self._emb_snapshots.append((step, e[:, :2].cpu().clone()))
+        if e.shape[0] >= 2:
+            sp = phis.sort().values
+            gaps = torch.diff(sp)
+            wrap = (sp[0] + 2 * torch.pi) - sp[-1]
+            metrics["emb_phi_min_gap"] = torch.minimum(gaps.min(), wrap)
+        for name, val in metrics.items():
+            self.recorder.add(name, step=step, val=val)
+        self.log("emb_R", R, on_step=True, on_epoch=False, prog_bar=True)
+
+    def visualize_embedding_concentration(self, fig_path):
+        """Render the embedding-collapse figure (concentration curves + a polar
+        init-vs-final angle scatter) from the tracked series and current weights.
+        Returns the figure path, or None when there is nothing to show (no
+        learnable embedding, or training never recorded the series)."""
+        we = self.word_embedding
+        if we is None or "emb_R" not in self.recorder.history_dict:
+            return None
+        e = we.detach().to(torch.float64)
+        norms = e.norm(dim=-1)
+        u = e / norms.clamp_min(1e-12).unsqueeze(-1)
+        final_phis = torch.atan2(u[:, 1], u[:, 0]).cpu().numpy()
+        init = getattr(self, "_init_phis", None)
+        return plot_embedding_concentration(
+            recorder=self.recorder,
+            output_path=fig_path,
+            init_phis=None if init is None else init.cpu().numpy(),
+            final_phis=final_phis,
+            final_norms=norms.cpu().numpy(),
+        )
+
+    def animate_embedding_trajectory(self, out_path, fps: int = 12):
+        """Animate the trainable word-embedding rows moving on the Poincaré disk
+        across training steps (one frame per recorded snapshot, see
+        `_record_embedding_concentration`). Each word keeps a fixed colour;
+        the unit circle is the disk boundary. Returns the GIF path, or None when
+        there is nothing to animate (no learnable embedding / no snapshots)."""
+        snaps = getattr(self, "_emb_snapshots", None)
+        if self.word_embedding is None or not snaps:
+            return None
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.animation import FuncAnimation, PillowWriter
+        import numpy as np
+
+        steps = [int(s) for s, _ in snaps]
+        coords = [c.numpy() for _, c in snaps]                    # list of (V, 2)
+        V = coords[0].shape[0]
+        allc = np.concatenate(coords, axis=0)
+        finite = allc[np.isfinite(allc).all(axis=1)]
+        lim = 1.05 if finite.size == 0 else max(1.05, float(np.abs(finite).max()) * 1.1)
+        colors = plt.cm.hsv(np.linspace(0.0, 1.0, V, endpoint=False))
+
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.add_patch(plt.Circle((0, 0), 1.0, fill=False, color="k", lw=1.3))   # disk boundary
+        ax.axhline(0, color="0.9", lw=0.6); ax.axvline(0, color="0.9", lw=0.6)
+        ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim)
+        ax.set_aspect("equal"); ax.set_xticks([]); ax.set_yticks([])
+        # Faint full trajectories behind the moving points (only when legible).
+        if V <= 100 and len(coords) > 1:
+            traj = np.stack(coords, axis=0)                       # (T, V, 2)
+            for v in range(V):
+                ax.plot(traj[:, v, 0], traj[:, v, 1], color=colors[v], lw=0.8, alpha=0.35, zorder=2)
+        scat = ax.scatter(coords[0][:, 0], coords[0][:, 1], c=colors, s=70,
+                          edgecolors="k", linewidths=0.5, zorder=4)
+        title = ax.set_title(f"word embedding @ step {steps[0]}  (V={V})")
+
+        def update(i):
+            scat.set_offsets(coords[i])
+            title.set_text(f"word embedding @ step {steps[i]}  (V={V})")
+            return scat, title
+
+        out_path = str(out_path)
+        anim = FuncAnimation(fig, update, frames=len(coords),
+                             interval=1000.0 / max(fps, 1), blit=False)
+        anim.save(out_path, writer=PillowWriter(fps=fps))
+        plt.close(fig)
+        return out_path
+
     @staticmethod
     def _variance_from_sums(total: float, sq_total: float, count: int) -> float:
         if count <= 1:
@@ -536,6 +815,7 @@ class HyperbolicDLM(L.LightningModule):
         proposal_type: str,
         proposal_exp_rate: float,
         vocab_size: int,
+        word_embedding: Optional[torch.FloatTensor],
         device: torch.device,
         generator: Optional[torch.Generator] = None,
     ):
@@ -550,12 +830,22 @@ class HyperbolicDLM(L.LightningModule):
             generator=generator,
         )
 
-        rhos, thetas = self.bridge.binary_bridge(ts=ts)
-        # if self.rotate_emb:
+        
         # For calculating posterior
-        thetas = thetas + (
-            targets.to(dtype=torch.float64) + 0.5
-        ) * (2 * torch.pi / int(vocab_size))
+        # Case 1: The word embedding is Equally divided around the circle
+        # rhos, thetas = self.bridge.binary_bridge(ts=ts)
+        # if self.rotate_emb:
+        #     thetas = thetas + (
+        #         targets.to(dtype=torch.float64) + 0.5
+        #     ) * (2 * torch.pi / int(vocab_size))
+
+        # Case 2: The word embedding is learnable
+        rhos, thetas = self.bridge.binary_bridge(
+            ts=ts,
+            targets=targets,
+            vocab_size=vocab_size,
+            word_embedding=word_embedding,
+        )
 
         if "lorentz" in self.loss_geometry:
             z = self.bridge.polar_to_lorentz(rhos, thetas).to(dtype=torch.float32)
@@ -587,6 +877,7 @@ class HyperbolicDLM(L.LightningModule):
             proposal_type=self.config.loss_proposal_type,
             proposal_exp_rate=self.config.loss_proposal_exp_rate,
             vocab_size=self.config.vocab_size,
+            word_embedding=self.word_embedding,
             device=self.device,
             generator=loss_gen,
         )
@@ -597,6 +888,7 @@ class HyperbolicDLM(L.LightningModule):
             thetas=thetas_loss,
             proposal_weight=pw_loss,
             loss_geometry=self.loss_geometry,
+            word_embedding=self.word_embedding,
         )
         ce = torch.nn.functional.cross_entropy(loss_logits, targets, reduction="none")
 
@@ -619,6 +911,7 @@ class HyperbolicDLM(L.LightningModule):
                 proposal_type=self.config.nelbo_proposal_type,
                 proposal_exp_rate=self.config.nelbo_proposal_exp_rate,
                 vocab_size=self.config.vocab_size,
+                word_embedding=self.word_embedding,
                 device=self.device,
                 generator=nelbo_gen,
             )
@@ -629,6 +922,7 @@ class HyperbolicDLM(L.LightningModule):
                 thetas=thetas_nelbo,
                 proposal_weight=pw_nelbo,
                 loss_geometry=self.config.nelbo_geometry,
+                word_embedding=self.word_embedding,
             )
 
         return {
@@ -657,6 +951,7 @@ class HyperbolicDLM(L.LightningModule):
             prog_bar=False,
         )
         self.log("train_ce", losses["ce"].mean(), on_step=True, on_epoch=True, prog_bar=False)
+        self._record_embedding_concentration(step=int(self.global_step) + 1)
         return loss
 
     def validation_step(self, batch: torch.Tensor, batch_idx: int):
@@ -1025,12 +1320,18 @@ def main(cfg: DictConfig) -> None:
     cfg = OmegaConf.merge(defaults, cfg)
     print(OmegaConf.to_yaml(cfg))
 
+    # Resolve the ps spec (e.g. a list, or a named string like "c1e3_exp1.0")
+    # through the data module, then align ps and vocab_size on the config so the
+    # model, the run-folder name, and the data all use the same distribution.
+    datamodule = UnigramDataModule(config=cfg)
+    cfg.ps = datamodule.ps
+    cfg.vocab_size = datamodule.vocab_size
+
     task_mgr = TaskMgr(work_dir=cfg.folder)
     if task_mgr.check_finished():
         return
 
     L.seed_everything(int(cfg.seed), workers=True)
-    datamodule = UnigramDataModule(config=cfg)
     model = HyperbolicDLM(config=cfg)
     trainer = L.Trainer(
         accelerator="auto",
@@ -1055,6 +1356,16 @@ def main(cfg: DictConfig) -> None:
     )
     print(f"Saved loss data to: {saved['data_path']}")
     print(f"Saved loss plot to: {saved['figure_path']}")
+    emb_fig = model.visualize_embedding_concentration(
+        os.path.join(cfg.folder, "emb_concentration.jpg")
+    )
+    if emb_fig is not None:
+        print(f"Saved embedding-concentration plot to: {emb_fig}")
+    emb_anim = model.animate_embedding_trajectory(
+        os.path.join(cfg.folder, "emb_trajectory.gif")
+    )
+    if emb_anim is not None:
+        print(f"Saved embedding-trajectory animation to: {emb_anim}")
     if model.test_timesteps is not None:
         proposal_density = 1.0 / model.test_proposal_weights
         ts_saved = plot_test_loss_vs_timestep(

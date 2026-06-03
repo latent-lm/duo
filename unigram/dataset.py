@@ -52,6 +52,8 @@ class UnigramDataset(Dataset):
         return self.tokens[index]
 
 class UnigramDataModule(L.LightningDataModule):
+    PS_NAIVE = "naive_ps"
+    PS_CMPLX = "cmplx_ps"
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -63,6 +65,32 @@ class UnigramDataModule(L.LightningDataModule):
     def entropy(self, ps):
         ps = process_ps(ps)
         return -(ps * torch.log(ps)).sum()
+
+    def ps_generator(self, config: dict):
+        ret_ps = None
+        ps_str = str(self.config.ps)
+        if isinstance(self.config.ps, str):
+            if ps_str == PS_NAIVE:
+                ret_ps = [0.91,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01,0.01]
+            elif ps_str == PS_CMPLX:
+                ret_ps = [0.31,0.01,0.2,0.01,0.01,0.3,0.08,0.04,0.03,0.01]
+            elif ps_str == "cmplx_ps1":
+                ret_ps = [0.11,0.10,0.10,0.11,0.11,0.10,0.10,0.10,0.09,0.08]
+            elif ps_str == "c1e3_exp1.0":
+                # TODO: create a list with 100 item, the value of each item follows the exponential distribution with \lambda=1.0
+            elif ps_str == "c1e4_exp1.0":
+                # TODO: create a list with 1000 item, the value of each item follows the exponential distribution with \lambda=1.0
+            elif ps_str == "c1e5_exp1.0":
+                # TODO: create a list with 10000 item, the value of each item follows the exponential distribution with \lambda=1.0
+            else:
+                # TODO: Finish the error message
+                raise ValueError(f"config.ps, {ps_str}, is not supported, only support ")
+        elif isinstance(self.config.ps, (list, tuple)):
+            ret_ps = list(self.config.ps)
+        else:
+            # TODO: Finish the error message
+            raise ValueError(f"type of config.ps, {type(self.config.ps)} is not supported, only support ")
+        return ret_ps
 
     def setup(self, stage: str | None = None):
         del stage
