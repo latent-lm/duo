@@ -34,6 +34,11 @@ class LossGeometry:
     HORO_CROSS_ENTROPY: str = "horo_cross_entropy"
     CROSS_ENTROPY: str = "cross_entropy"
 
+@dataclass
+class FlowPath:
+    HYPERBOLIC_BOUNDARY: str = "hyperbolic_boundary"
+    HYPERBOLIC_RFM: str = "hyperbolic_rfm"
+
 class HyperBridge:
     PROPOSAL_EXP_NAME: str = "exp"
     PROPOSAL_STRATIFIED_EXP_NAME: str = "stratified_exp"
@@ -62,6 +67,55 @@ class HyperBridge:
         return chi2.sqrt().reshape(nshape)
 
     @staticmethod
+    def wrapped_normal(shape, std):
+        r"""Sample `(rho, u)` from the wrapped normal on `H^d` centred at the origin.
+
+        Draws a tangent-space Gaussian `v ~ N(0, Sigma)` at the origin and reads off
+        the polar coordinates of its exponential map. Since
+        `exp_o(0, v) = (cosh ||v||, sinh ||v|| * v / ||v||)`, the radial coordinate is
+        `rho = ||v||` (the geodesic distance to the origin) and the angular coordinate
+        is the unit direction `u = v / ||v||` on `S^{d-1}`. The covariance `Sigma` is
+        set by `std` (see below).
+
+        Args:
+            shape (`torch.Size` or tuple of `int`):
+                Output sample shape `(..., embedding_size)`; the last axis
+                `d = embedding_size` is the tangent / embedding dimension.
+            std (`float` or `torch.FloatTensor` of shape `()`, `(d,)`, or `(d, d)`):
+                Tangent-space Gaussian scale. A scalar or `(d,)` vector scales each
+                axis (diagonal `Sigma`); a `(d, d)` matrix is the scale factor `L`
+                giving `Sigma = L L^T` (`v = epsilon @ L^T`).
+
+        Returns:
+            tuple `(radial, angular)`:
+                radial (`torch.FloatTensor` of shape `(...,)`):
+                    Radial coordinate `rho = ||v|| >= 0`, the geodesic distance to
+                    the origin.
+                angular (`torch.FloatTensor` of shape `(..., embedding_size)`):
+                    Unit direction `u = v / ||v||` on `S^{d-1}`.
+        """
+
+        # Wrapped normal on H^d with base point at the origin (Nagano et al. 2019):
+        # sample a tangent-space Gaussian v ~ N(0, Sigma) and exp-map it at the
+        # origin. Since exp_o(0, v) = (cosh||v||, sinh||v|| * v/||v||), the polar
+        # coordinates are simply rho = ||v|| and direction u = v/||v||.
+        v = torch.randn(shape)
+        # Apply the tangent-space scale `std`: scalar / (D,) diagonal scale each
+        # axis; a (D, D) matrix is a Cholesky-style factor giving Cov = std std^T.
+        if not torch.is_tensor(std):
+            std = torch.as_tensor(std, dtype=v.dtype, device=v.device)
+        else:
+            std = std.to(dtype=v.dtype, device=v.device)
+        if std.ndim < 2:
+            v = v * std
+        else:
+            v = v @ std.transpose(-1, -2)
+
+        ps = v.norm(p=2, dim=-1)
+        thetas = v / v.norm(p=2, keepdim=True, dim=-1)
+        return ps, thetas
+
+    @staticmethod
     def binary_bridge_old(ts):
         ns = torch.poisson(ts/8).to(torch.int64)
         ss = ts.sqrt() * HyperBridge.sample_chi(2*ns+3, ts.dtype)
@@ -70,6 +124,73 @@ class HyperBridge:
         us = torch.rand_like(ts)
         thetas = 2 * torch.atan((-ps).exp() * torch.tan(torch.pi * (us - 0.5)))
         return (ps,thetas)
+
+    @staticmethod
+    def geodesic(
+        src_radial: torch.FloatTensor,
+        src_angle: torch.FloatTensor,
+        dest_radial: torch.FloatTensor,
+        dest_angle: torch.FloatTensor,
+        ts: torch.FloatTensor,
+    ):
+        r"""Constant-speed hyperbolic geodesic on `H^2` from source to destination at fraction `ts`.
+
+        Moves along the geodesic connecting the source polar point
+        `(src_radial, src_angle)` to the destination polar point
+        `(dest_radial, dest_angle)`, returning the point reached at fraction `ts` in
+        the same polar `(rho, theta)` convention as the inputs (`ts = 0` -> source,
+        `ts = 1` -> destination). The endpoints are lifted to the Lorentz hyperboloid
+        and interpolated at constant speed; the intrinsic distance uses the
+        differential form `cosh d - 1 = <x - y, x - y>_L / 2` to avoid the
+        catastrophic cancellation of the raw inner product.
+
+        Args:
+            src_radial (`torch.FloatTensor` of shape `(batch_size,)`):
+                Radial coordinate `rho` of the source (geodesic distance to the origin).
+            src_angle (`torch.FloatTensor` of shape `(batch_size,)`):
+                Angular coordinate `theta` of the source.
+            dest_radial (`torch.FloatTensor` of shape `(batch_size,)`):
+                Radial coordinate `rho` of the destination.
+            dest_angle (`torch.FloatTensor` of shape `(batch_size,)`):
+                Angular coordinate `theta` of the destination.
+            ts (`torch.FloatTensor` of shape `(batch_size,)`):
+                Fraction along the geodesic in `[0, 1]` (`0` -> source, `1` -> destination).
+
+        Returns:
+            tuple `(rhos, thetas)`, each `torch.FloatTensor` of shape `(batch_size,)`:
+                polar coordinates of the interpolated point, with `rhos >= 0`.
+        """
+        # Constant-speed geodesic on H^2 from the source polar point to the
+        # destination polar point, evaluated at fraction ts (0 -> src, 1 -> dest)
+        # and returned in the same polar (rho, theta) convention as the inputs:
+        #
+        #   gamma(t) = sinh((1 - t) d) / sinh(d) * x + sinh(t d) / sinh(d) * y
+        #
+        # where x, y are the Lorentz lifts of the endpoints and
+        # d = arccosh(-<x, y>_L) is their geodesic distance. The distance is
+        # taken from the differential form cosh(d) - 1 = <x - y, x - y>_L / 2 to
+        # avoid the catastrophic cancellation of the raw inner product.
+        x = HyperBridge.polar_to_lorentz(src_radial, src_angle)    # (batch, 3)
+        y = HyperBridge.polar_to_lorentz(dest_radial, dest_angle)  # (batch, 3)
+
+        diff = x - y
+        diff_inner = -diff[..., 0].square() + diff[..., 1:].square().sum(-1)
+        d = torch.acosh(1.0 + (diff_inner / 2.0).clamp_min(0.0))    # (batch,)
+
+        tiny = torch.finfo(x.dtype).tiny
+        d_col = d.unsqueeze(-1)                                     # (batch, 1)
+        ts_col = ts.to(dtype=x.dtype).unsqueeze(-1)                 # (batch, 1)
+        sinh_d = torch.sinh(d_col).clamp_min(tiny)
+        coef_x = torch.sinh((1.0 - ts_col) * d_col) / sinh_d
+        coef_y = torch.sinh(ts_col * d_col) / sinh_d
+        gamma = coef_x * x + coef_y * y                            # (batch, 3)
+        # Coincident endpoints (d -> 0): the sinh ratios are 0/0, fall back to
+        # the Euclidean lerp they approach.
+        gamma = torch.where(d_col < 1e-6, (1.0 - ts_col) * x + ts_col * y, gamma)
+
+        rho = torch.acosh(gamma[..., 0].clamp_min(1.0))            # (batch,)
+        theta = torch.atan2(gamma[..., 2], gamma[..., 1])          # (batch,)
+        return rho, theta
 
     @staticmethod
     def _vocab_angles(
@@ -133,6 +254,29 @@ class HyperBridge:
             word_embedding=word_embedding,
         )
         return ps, thetas
+    
+    @staticmethod
+    def binary_geodesic_bridge(
+        ts,
+        targets: torch.LongTensor,
+        vocab_size: int,
+        word_embedding: Optional[torch.FloatTensor] = None,
+        std: float = 1.0,
+    ):
+        rhos, thetas = HyperBridge.wrapped_normal(shape=, std=std)
+        dest = word_embedding[targets]
+
+        dest_radial = dest.norm(p=2, keepdim=True, dim=-1)
+        dest_angle = dest / dest_radial
+        rhos_t, thetas_t = HyperBridge.geodesic(
+            src_radial=rhos,
+            src_angle=thetas,
+            dest_radial=dest_radial,
+            dest_angle=dest_angle,
+            ts=ts
+        )
+        return rhos_t, thetas_t
+
 
     @staticmethod
     def polar_to_lorentz(rhos, thetas):
@@ -846,12 +990,22 @@ class HyperbolicDLM(L.LightningModule):
         #     ) * (2 * torch.pi / int(vocab_size))
 
         # Case 2: The word embedding is learnable
-        rhos, thetas = self.bridge.binary_bridge(
-            ts=ts,
-            targets=targets,
-            vocab_size=vocab_size,
-            word_embedding=word_embedding,
-        )
+        if self.config.flow_path == FlowPath.HYPERBOLIC_BOUNDARY:
+            rhos, thetas = self.bridge.binary_bridge(
+                ts=ts,
+                targets=targets,
+                vocab_size=vocab_size,
+                word_embedding=word_embedding,
+            )
+        elif self.config.flow_path == FlowPath.HYPERBOLIC_RFM:
+            rhos, thetas = self.bridge.binary_geodesic_bridge(
+                ts=ts,
+                targets=targets,
+                vocab_size=vocab_size,
+                word_embedding=word_embedding,
+            )
+        else:
+            raise ValueError(f"config.flow_path = {self.config.flow_path} is not supported, only suppport ({FlowPath.HYPERBOLIC_BOUNDARY}, {FlowPath.HYPERBOLIC_RFM}).")
 
         if "lorentz" in self.loss_geometry:
             z = self.bridge.polar_to_lorentz(rhos, thetas).to(dtype=torch.float32)
