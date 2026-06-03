@@ -1,3 +1,30 @@
+"""Free hyperbolic / spherical heat-kernel samplers and geodesic primitives.
+
+This module exposes three parallel sampler classes that share an identical
+API surface (modulo a `poincare` / `lorentz` / `sphere` prefix):
+
+- [`FreeBinaryHyperbolicHeatKernel`]: closed-form `d == 2` reference; every
+  `d == 2` call from the higher-dimensional classes dispatches here for
+  bit-exact parity.
+- [`FreeHyperbolicHeatKernel`]: `d`-dimensional free hyperbolic heat kernel
+  on `H^d` with three interchangeable angular samplers (`boost`, `icdf`,
+  `vmf`).
+- [`FreeSphericalHeatKernel`]: dual `S^d` sampler via the kappa-flipped
+  Gruet ansatz; validated only for `t <= _SPHERE_T_MAX`.
+
+The module also exposes a set of coordinate converters between Poincare-ball,
+Lorentz-Cartesian, and ambient-sphere representations; these are pure tensor
+ops with no random state.
+
+Numerical guards:
+- `_LORENTZ_RHO_MAX = 20`: any Lorentz-Cartesian output beyond this raises
+  `ValueError`. Polar outputs are unrestricted.
+- `_SPHERE_T_MAX = 0.5`: any spherical heat-kernel input beyond this raises
+  `ValueError`.
+
+See `unigram/hyper_dm.md` for the underlying math.
+"""
+
 import torch
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -5,6 +32,8 @@ from typing import Optional, Tuple
 
 @dataclass
 class Geometry:
+    """String tags identifying which manifold representation a tensor lives in."""
+
     POINCARE: str = "poincare"
     LORENTZ_POLAR: str = "lorentz_polar"
     LORENTZ_CARTESIAN: str = "lorentz_cartesian"
@@ -12,6 +41,8 @@ class Geometry:
 
 @dataclass
 class Coordinate:
+    """String tags selecting polar vs Cartesian output from kernel/bridge methods."""
+
     POLAR: str = "polar"
     CARTESIAN: str = "cartesian"
 
@@ -152,6 +183,20 @@ def poincare_polar_to_lorentz_cartesian(
 def poincare_cartesian_to_poincare_polar(
     z: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Convert a Poincare-disk Cartesian point into polar `(rho, theta_or_u)`.
+
+    For `d == 2` the second return is a scalar `theta = atan2(y, x)`; for `d >= 3`
+    it is the unit direction `z / ||z||` of shape `(..., d)`.
+
+    Args:
+        z (`torch.Tensor` of shape `(..., d)`):
+            Poincare-disk Cartesian coordinates satisfying `||z|| < 1`.
+
+    Returns:
+        `Tuple[torch.Tensor, torch.Tensor]`:
+            - `rhos` of shape `(...)`: hyperbolic radial coordinate `rho = 2 * atanh(||z||)`.
+            - `theta_or_u`: angle of shape `(...)` if `d == 2`, else unit vector of shape `(..., d)`.
+    """
     tiny = torch.finfo(z.dtype).tiny
     norms = z.norm(dim=-1)
     rhos = 2.0 * torch.atanh(norms.clamp(max=1.0 - torch.finfo(z.dtype).eps))
@@ -165,6 +210,19 @@ def poincare_cartesian_to_poincare_polar(
 
 @torch.no_grad()
 def poincare_cartesian_to_lorentz_cartesian(z: torch.Tensor) -> torch.Tensor:
+    """Convert Poincare-disk Cartesian to Lorentz-Cartesian via stereographic lift.
+
+    The map is `z -> ((1 + ||z||^2) / (1 - ||z||^2), 2 z / (1 - ||z||^2))`, taking
+    `B^d` into the upper hyperboloid in `R^{1, d}`.
+
+    Args:
+        z (`torch.Tensor` of shape `(..., d)`):
+            Poincare-disk Cartesian coordinates satisfying `||z|| < 1`.
+
+    Returns:
+        `torch.Tensor` of shape `(..., d + 1)`: ambient Lorentz-Cartesian coordinates
+        satisfying `-z[0]^2 + sum(z[1:]^2) = -1`.
+    """
     norm_sq = (z * z).sum(-1)
     denom = (1.0 - norm_sq).clamp_min(torch.finfo(z.dtype).tiny)
     t = (1.0 + norm_sq) / denom
@@ -176,6 +234,22 @@ def poincare_cartesian_to_lorentz_cartesian(z: torch.Tensor) -> torch.Tensor:
 def lorentz_cartesian_to_poincare_polar(
     z_lorentz: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Convert Lorentz-Cartesian to polar `(rho, theta_or_u)`.
+
+    `rho = arccosh(z[0])` recovers the radial geodesic distance to the origin; the
+    angular part is `atan2(y, x)` in `d == 2` and the normalized spatial vector in
+    `d >= 3`.
+
+    Args:
+        z_lorentz (`torch.Tensor` of shape `(..., d + 1)`):
+            Ambient Lorentz-Cartesian coordinates with `z[0] >= 1`.
+
+    Returns:
+        `Tuple[torch.Tensor, torch.Tensor]`:
+            - `rhos` of shape `(...)`.
+            - `theta_or_u`: scalar angle of shape `(...)` for `d == 2`, else unit
+              vector of shape `(..., d)`.
+    """
     tiny = torch.finfo(z_lorentz.dtype).tiny
     rhos = torch.acosh(z_lorentz[..., 0].clamp_min(1.0))
     spatial = z_lorentz[..., 1:]
@@ -190,6 +264,17 @@ def lorentz_cartesian_to_poincare_polar(
 
 @torch.no_grad()
 def lorentz_cartesian_to_poincare_cartesian(z_lorentz: torch.Tensor) -> torch.Tensor:
+    """Stereographic projection from the upper hyperboloid to the Poincare disk.
+
+    The map is `z -> z[1:] / (1 + z[0])`.
+
+    Args:
+        z_lorentz (`torch.Tensor` of shape `(..., d + 1)`):
+            Ambient Lorentz-Cartesian coordinates with `z[0] >= 1`.
+
+    Returns:
+        `torch.Tensor` of shape `(..., d)`: Poincare-disk Cartesian coordinates.
+    """
     spatial = z_lorentz[..., 1:]
     t = z_lorentz[..., 0]
     denom = (1.0 + t).unsqueeze(-1).clamp_min(torch.finfo(z_lorentz.dtype).tiny)
@@ -200,6 +285,23 @@ def lorentz_cartesian_to_poincare_cartesian(z_lorentz: torch.Tensor) -> torch.Te
 def sphere_polar_to_cartesian(
     phis: torch.Tensor, thetas_or_u: torch.Tensor
 ) -> torch.Tensor:
+    """Convert spherical polar `(phi, theta_or_u)` to Cartesian on `S^d`.
+
+    `phi` is the colatitude from the north pole `e_1`; the second argument is a
+    scalar azimuth for `d == 2` (so spatial dim is `(d,)`) or a unit vector on
+    `S^{d-1}` for `d >= 3`.
+
+    Args:
+        phis (`torch.Tensor` of shape `(...)`):
+            Colatitude in `[0, pi]`.
+        thetas_or_u (`torch.Tensor`):
+            Azimuthal angle of shape `(...)` (if `d == 2`) or unit vector of shape
+            `(..., d)` (if `d >= 3`).
+
+    Returns:
+        `torch.Tensor` of shape `(..., d + 1)`: ambient Cartesian coordinates on
+        the unit sphere `S^d`.
+    """
     direction = _polar_direction(phis, thetas_or_u)
     return torch.cat(
         [
@@ -214,6 +316,20 @@ def sphere_polar_to_cartesian(
 def sphere_cartesian_to_polar(
     z_sphere: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Convert Cartesian on `S^d` to polar `(phi, theta_or_u)`.
+
+    Inverse of [`sphere_polar_to_cartesian`].
+
+    Args:
+        z_sphere (`torch.Tensor` of shape `(..., d + 1)`):
+            Cartesian coordinates on the unit sphere.
+
+    Returns:
+        `Tuple[torch.Tensor, torch.Tensor]`:
+            - `phis` of shape `(...)`: colatitude in `[0, pi]`.
+            - `theta_or_u`: azimuthal angle of shape `(...)` for `d == 2`, else
+              unit vector of shape `(..., d)`.
+    """
     tiny = torch.finfo(z_sphere.dtype).tiny
     phis = torch.acos(z_sphere[..., 0].clamp(-1.0, 1.0))
     spatial = z_sphere[..., 1:]
@@ -304,7 +420,21 @@ def _gruet_radial(ts: torch.Tensor, d: int, kappa: int) -> torch.Tensor:
 
 
 class FreeBinaryHyperbolicHeatKernel:
-    """d=2 closed-form free hyperbolic heat kernel and bridge."""
+    """Closed-form free hyperbolic heat kernel and bridge on `H^2` (d=2).
+
+    Implements Gruet's series representation specialized to the disk: a Poisson
+    count `n ~ Poisson(t / 8)`, a chi draw `s = sqrt(t) * chi(2n + 3)`, and a
+    uniform mixing variable `v` jointly realize
+    `rho = arccosh(v^2 + (1 - v^2) cosh(s))` distributed as the radial marginal
+    of `H^2` Brownian motion at time `t`. The azimuthal angle is then sampled
+    from the conditional Poisson kernel `(cosh rho - sinh rho cos theta)^{-1}`.
+
+    All methods are `@staticmethod` and run under `torch.no_grad()`; they accept
+    a `ts` batch of heat times of shape `(batch_size,)` and an optional
+    `output_coord` in `{Coordinate.POLAR, Coordinate.CARTESIAN}` selecting the
+    return geometry. `d=2` outputs from [`FreeHyperbolicHeatKernel`] dispatch
+    here to preserve bit-exact equivalence.
+    """
 
     @staticmethod
     @torch.no_grad()
@@ -312,6 +442,21 @@ class FreeBinaryHyperbolicHeatKernel:
         rhos: torch.FloatTensor,
         thetas: torch.FloatTensor,
     ) -> torch.FloatTensor:
+        """Convert `(rho, theta)` on `H^2` to Lorentz-Cartesian coordinates.
+
+        Specialized `d == 2` analogue of the module-level
+        [`poincare_polar_to_lorentz_cartesian`] that consumes a scalar angle.
+
+        Args:
+            rhos (`torch.FloatTensor` of shape `(batch_size,)`):
+                Hyperbolic radial coordinate.
+            thetas (`torch.FloatTensor` of shape `(batch_size,)`):
+                Azimuthal angle.
+
+        Returns:
+            `torch.FloatTensor` of shape `(batch_size, 3)`: Lorentz-Cartesian
+            coordinates `(cosh rho, sinh rho * cos theta, sinh rho * sin theta)`.
+        """
         sinh_r = torch.sinh(rhos)
         return torch.stack(
             [torch.cosh(rhos), sinh_r * thetas.cos(), sinh_r * thetas.sin()],
@@ -319,18 +464,43 @@ class FreeBinaryHyperbolicHeatKernel:
         )
 
     @staticmethod
-    def sample_chi(ns, dtype=torch.float64):
-        # chi(n) = sqrt(chi^2(n)), and chi^2(n) ~ Gamma(shape=n/2, scale=2).
-        # Sampling Gamma directly avoids allocating sum(ns) standard normals,
-        # which blows up when ns is large.
+    def sample_chi(ns: torch.Tensor, dtype: torch.dtype = torch.float64) -> torch.Tensor:
+        """Sample `chi(n)` via the Gamma identity `chi^2(n) ~ Gamma(n/2, scale=2)`.
+
+        Direct Gamma sampling avoids materializing `sum(ns)` standard normals,
+        which is critical when `ns` carries large counts (e.g. via Poisson rates
+        at large `t`).
+
+        Args:
+            ns (`torch.Tensor` of shape `(batch_size,)`):
+                Integer degrees of freedom.
+            dtype (`torch.dtype`, *optional*, defaults to `torch.float64`):
+                Floating-point precision of the draw.
+
+        Returns:
+            `torch.Tensor` of shape `(batch_size,)`: chi samples.
+        """
         concentration = ns.to(dtype) / 2
         rate = torch.tensor(0.5, device=ns.device, dtype=dtype)
         chi2 = torch.distributions.Gamma(concentration, rate).sample()
-        # print(f"chi2: {isnan_or_inf(chi2).any()}")
         return chi2.sqrt()
 
     @staticmethod
-    def sample_chi_old(ns, dtype=torch.float64):
+    def sample_chi_old(ns: torch.Tensor, dtype: torch.dtype = torch.float64) -> torch.Tensor:
+        """Legacy `chi(n)` sampler via summed squared normals.
+
+        Retained for reference and parity checks against [`sample_chi`]; not used
+        on the hot path because it allocates `sum(ns)` standard normals.
+
+        Args:
+            ns (`torch.Tensor`):
+                Integer degrees of freedom, any shape.
+            dtype (`torch.dtype`, *optional*, defaults to `torch.float64`):
+                Floating-point precision of the draw.
+
+        Returns:
+            `torch.Tensor` of the same shape as `ns`: chi samples.
+        """
         nshape = ns.shape
         ns = ns.reshape(-1)
         M = ns.sum().item()
@@ -354,7 +524,7 @@ class FreeBinaryHyperbolicHeatKernel:
             POLAR: `(rhos, thetas)`. CARTESIAN: Poincare disk `z` of shape `(B, 2)`.
         """
         ns = torch.poisson(ts/8).to(torch.int64)
-        ss = ts.sqrt() * HyperBridge.sample_chi(2*ns+3, ts.dtype)
+        ss = ts.sqrt() * FreeBinaryHyperbolicHeatKernel.sample_chi(2*ns+3, ts.dtype)
         vs = torch.rand_like(ts)
         ps = torch.acosh(vs.square() + (1-vs.square())*torch.cosh(ss))
         us = torch.rand_like(ts)
@@ -369,6 +539,20 @@ class FreeBinaryHyperbolicHeatKernel:
         ts: torch.FloatTensor,
         output_coord: Optional[str] = None,
     ):
+        """Sample from the free hyperbolic heat kernel on `H^2` in Lorentz form.
+
+        Args:
+            ts (`torch.FloatTensor` of shape `(batch_size,)`):
+                Heat times.
+            output_coord (`str`, *optional*, defaults to `Coordinate.CARTESIAN`):
+                Either `Coordinate.POLAR` (returns `(rho, theta)`) or
+                `Coordinate.CARTESIAN` (returns Lorentz-Cartesian coords).
+
+        Returns:
+            POLAR: tuple `(rhos, thetas)` each of shape `(batch_size,)`.
+            CARTESIAN: `torch.FloatTensor` of shape `(batch_size, 3)`. Raises
+            `ValueError` if `max(rho) > _LORENTZ_RHO_MAX`.
+        """
         rhos, thetas = FreeBinaryHyperbolicHeatKernel.binary_free_poincare_heat_kernel(
             ts=ts, output_coord=Coordinate.POLAR
         )
@@ -385,6 +569,26 @@ class FreeBinaryHyperbolicHeatKernel:
         word_embedding: torch.FloatTensor,
         output_coord: Optional[str] = None,
     ):
+        """Sample the `H^2` bridge endpoint conditioned on a target embedding.
+
+        The free-heat-kernel angle is rotated by `atan2(e[1], e[0])` so the
+        resulting sample is concentrated near the target direction `e =
+        word_embedding[targets]`.
+
+        Args:
+            ts (`torch.FloatTensor` of shape `(batch_size,)`):
+                Heat times.
+            targets (`torch.LongTensor` of shape `(batch_size,)`):
+                Vocabulary indices into `word_embedding`.
+            word_embedding (`torch.FloatTensor` of shape `(vocab_size, 2)`):
+                Word-embedding table. Only the angular part is used.
+            output_coord (`str`, *optional*, defaults to `Coordinate.POLAR`):
+                `Coordinate.POLAR` or `Coordinate.CARTESIAN`.
+
+        Returns:
+            POLAR: tuple `(rhos, thetas)` each of shape `(batch_size,)`.
+            CARTESIAN: Poincare-disk coordinates of shape `(batch_size, 2)`.
+        """
         rhos, thetas = FreeBinaryHyperbolicHeatKernel.binary_free_poincare_heat_kernel(
             ts=ts, output_coord=Coordinate.POLAR
         )
@@ -403,6 +607,25 @@ class FreeBinaryHyperbolicHeatKernel:
         word_embedding: torch.FloatTensor,
         output_coord: Optional[str] = None,
     ):
+        """Lorentz-form `H^2` bridge endpoint conditioned on a target embedding.
+
+        Lorentz analogue of [`binary_poincare_bridge`].
+
+        Args:
+            ts (`torch.FloatTensor` of shape `(batch_size,)`):
+                Heat times.
+            targets (`torch.LongTensor` of shape `(batch_size,)`):
+                Vocabulary indices into `word_embedding`.
+            word_embedding (`torch.FloatTensor` of shape `(vocab_size, 2)`):
+                Word-embedding table.
+            output_coord (`str`, *optional*, defaults to `Coordinate.CARTESIAN`):
+                `Coordinate.POLAR` or `Coordinate.CARTESIAN`.
+
+        Returns:
+            POLAR: tuple `(rhos, thetas)` each of shape `(batch_size,)`.
+            CARTESIAN: Lorentz-Cartesian coords of shape `(batch_size, 3)`. Raises
+            `ValueError` if `max(rho) > _LORENTZ_RHO_MAX`.
+        """
         rhos, thetas = FreeBinaryHyperbolicHeatKernel.binary_poincare_bridge(
             ts=ts,
             targets=targets,
@@ -426,6 +649,41 @@ class FreeBinaryHyperbolicHeatKernel:
         dest_angular: Optional[torch.FloatTensor] = None,
         output_coord: Optional[str] = None,
     ):
+        """Constant-speed hyperbolic geodesic on `H^2` from `src` to `dest` at fraction `t`.
+
+        The endpoints are accepted either as Lorentz-Cartesian tensors (`src`,
+        `dest`) or as polar pairs (`src_radial`, `src_angular`, `dest_radial`,
+        `dest_angular`); exactly one form per endpoint must be provided. The
+        intrinsic distance uses the differential form
+        `cosh d - 1 = <x - y, x - y>_L / 2` to avoid cancellation at large `d`.
+
+        Args:
+            t (`float` or `torch.Tensor`):
+                Fraction along the geodesic, broadcastable to the batch shape.
+            src (`torch.FloatTensor` of shape `(batch_size, 3)`, *optional*):
+                Lorentz-Cartesian source.
+            dest (`torch.FloatTensor` of shape `(batch_size, 3)`, *optional*):
+                Lorentz-Cartesian destination.
+            src_radial (`torch.FloatTensor` of shape `(batch_size,)`, *optional*):
+                Polar radial coordinate of the source.
+            src_angular (`torch.FloatTensor` of shape `(batch_size,)`, *optional*):
+                Polar angle of the source.
+            dest_radial (`torch.FloatTensor` of shape `(batch_size,)`, *optional*):
+                Polar radial coordinate of the destination.
+            dest_angular (`torch.FloatTensor` of shape `(batch_size,)`, *optional*):
+                Polar angle of the destination.
+            output_coord (`str`, *optional*):
+                `Coordinate.CARTESIAN` or `Coordinate.POLAR`. Defaults to the
+                same form used to specify the source.
+
+        Returns:
+            CARTESIAN: `torch.FloatTensor` of shape `(batch_size, 3)`.
+            POLAR: tuple `(rhos, thetas)` each of shape `(batch_size,)`.
+
+        Raises:
+            ValueError: if neither or both forms of an endpoint are provided, or
+                if a polar input has `rho > _LORENTZ_RHO_MAX`.
+        """
         if (src is not None and (src_radial is not None or src_angular is not None)) or (
             src is None and (src_radial is None or src_angular is None)
         ):
@@ -474,7 +732,28 @@ def _reflect_to_target(u: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
 
 
 class FreeHyperbolicHeatKernel:
-    """d-dimensional free hyperbolic heat kernel sampler with three angular variants."""
+    """`d`-dimensional free hyperbolic heat kernel sampler.
+
+    Generalizes [`FreeBinaryHyperbolicHeatKernel`] to `H^d` for `d >= 2`. The
+    radial marginal is sampled via Gruet's representation
+    `rho = arccosh(v^2 + (1 - v^2) cosh(s))` with `n ~ Poisson((d-1)^2 t / 8)`
+    and `s = sqrt(t) * chi(2n + d + 1)`; the conditional angular distribution
+    `(cosh rho - sinh rho <e_1, u>)^{-(d-1)}` is then sampled by one of three
+    interchangeable methods.
+
+    Angular methods (selected via the `method` argument):
+        - `METHOD_BOOST` (default): apply the Lorentz boost
+          `c -> (1 - 2 b (1 - c) / T) / T` to a uniform direction. Cheapest.
+        - `METHOD_ICDF`: draw the polar coordinate `c` from its analytic CDF
+          via a symmetric Beta proposal, then pad with a uniform direction
+          on `S^{d-2}`.
+        - `METHOD_VMF`: alias of `METHOD_ICDF` (algebraically equivalent
+          under the `z <-> 1 - z` symmetry of the Beta proposal).
+
+    For `d == 2` every public method dispatches to
+    [`FreeBinaryHyperbolicHeatKernel`] for bit-exact parity. All methods are
+    `@staticmethod` and run under `torch.no_grad()`.
+    """
 
     METHOD_BOOST: str = "boost"
     METHOD_ICDF: str = "icdf"
@@ -483,6 +762,17 @@ class FreeHyperbolicHeatKernel:
     @staticmethod
     @torch.no_grad()
     def sample_radial(ts: torch.FloatTensor, d: int) -> torch.FloatTensor:
+        """Sample the radial marginal `rho` of the `H^d` free heat kernel.
+
+        Args:
+            ts (`torch.FloatTensor` of shape `(batch_size,)`):
+                Heat times.
+            d (`int`):
+                Hyperbolic dimension; must be `>= 2`.
+
+        Returns:
+            `torch.FloatTensor` of shape `(batch_size,)`: radial samples `rho`.
+        """
         if d < 2:
             raise ValueError(f"FreeHyperbolicHeatKernel requires d >= 2; got d={d}")
         if ts.numel() == 0:
@@ -496,6 +786,24 @@ class FreeHyperbolicHeatKernel:
         d: int,
         method: str = "boost",
     ) -> torch.FloatTensor:
+        """Sample the conditional angular distribution given `rho`.
+
+        For `d == 2` the result is a scalar angle of shape `(batch_size,)`. For
+        `d >= 3` it is a unit vector on `S^{d-1}` of shape `(batch_size, d)`.
+
+        Args:
+            rhos (`torch.FloatTensor` of shape `(batch_size,)`):
+                Radial coordinates returned by [`sample_radial`].
+            d (`int`):
+                Hyperbolic dimension; must be `>= 2`.
+            method (`str`, *optional*, defaults to `"boost"`):
+                One of `METHOD_BOOST`, `METHOD_ICDF`, `METHOD_VMF`. Ignored when
+                `d == 2`.
+
+        Returns:
+            `torch.FloatTensor`: angle of shape `(batch_size,)` for `d == 2`,
+            else unit direction of shape `(batch_size, d)`.
+        """
         if d < 2:
             raise ValueError(f"FreeHyperbolicHeatKernel requires d >= 2; got d={d}")
         if rhos.numel() == 0:
@@ -523,6 +831,26 @@ class FreeHyperbolicHeatKernel:
         method: str = "boost",
         output_coord: Optional[str] = None,
     ):
+        """Sample from the free `H^d` heat kernel in Poincare-ball form.
+
+        For `d == 2` this is exactly [`FreeBinaryHyperbolicHeatKernel.binary_free_poincare_heat_kernel`].
+
+        Args:
+            ts (`torch.FloatTensor` of shape `(batch_size,)`):
+                Heat times.
+            d (`int`):
+                Hyperbolic dimension; must be `>= 2`.
+            method (`str`, *optional*, defaults to `"boost"`):
+                Angular sampler — see [`sample_angular`].
+            output_coord (`str`, *optional*, defaults to `Coordinate.POLAR`):
+                `Coordinate.POLAR` or `Coordinate.CARTESIAN`.
+
+        Returns:
+            POLAR: `(rhos, u)` where `rhos` has shape `(batch_size,)` and `u` is
+            an angle of shape `(batch_size,)` for `d == 2` or a unit vector of
+            shape `(batch_size, d)` for `d >= 3`.
+            CARTESIAN: Poincare-ball coordinates of shape `(batch_size, d)`.
+        """
         if d < 2:
             raise ValueError(f"FreeHyperbolicHeatKernel requires d >= 2; got d={d}")
         if d == 2:
@@ -547,6 +875,23 @@ class FreeHyperbolicHeatKernel:
         method: str = "boost",
         output_coord: Optional[str] = None,
     ):
+        """Sample from the free `H^d` heat kernel in Lorentz-Cartesian form.
+
+        Args:
+            ts (`torch.FloatTensor` of shape `(batch_size,)`):
+                Heat times.
+            d (`int`):
+                Hyperbolic dimension; must be `>= 2`.
+            method (`str`, *optional*, defaults to `"boost"`):
+                Angular sampler.
+            output_coord (`str`, *optional*, defaults to `Coordinate.CARTESIAN`):
+                `Coordinate.POLAR` or `Coordinate.CARTESIAN`.
+
+        Returns:
+            POLAR: same as [`free_poincare_heat_kernel`].
+            CARTESIAN: `torch.FloatTensor` of shape `(batch_size, d + 1)`. Raises
+            `ValueError` if `max(rho) > _LORENTZ_RHO_MAX`.
+        """
         if d < 2:
             raise ValueError(f"FreeHyperbolicHeatKernel requires d >= 2; got d={d}")
         if d == 2:
@@ -574,6 +919,29 @@ class FreeHyperbolicHeatKernel:
         method: str = "boost",
         output_coord: Optional[str] = None,
     ):
+        """Sample the `H^d` bridge endpoint conditioned on a target embedding.
+
+        Draws a free-heat-kernel direction `u` and applies a Householder
+        reflection mapping `e_1` to the normalized target embedding, so the
+        resulting sample concentrates around `word_embedding[targets]`.
+
+        Args:
+            ts (`torch.FloatTensor` of shape `(batch_size,)`):
+                Heat times.
+            targets (`torch.LongTensor` of shape `(batch_size,)`):
+                Vocabulary indices.
+            word_embedding (`torch.FloatTensor` of shape `(vocab_size, d)`):
+                Word-embedding table; `d = word_embedding.shape[1]` selects the
+                hyperbolic dimension.
+            method (`str`, *optional*, defaults to `"boost"`):
+                Angular sampler.
+            output_coord (`str`, *optional*, defaults to `Coordinate.POLAR`):
+                `Coordinate.POLAR` or `Coordinate.CARTESIAN`.
+
+        Returns:
+            POLAR: `(rhos, u_rotated)` matching [`free_poincare_heat_kernel`].
+            CARTESIAN: Poincare-ball coordinates of shape `(batch_size, d)`.
+        """
         d = word_embedding.shape[1]
         if d == 2:
             return FreeBinaryHyperbolicHeatKernel.binary_poincare_bridge(
@@ -605,6 +973,27 @@ class FreeHyperbolicHeatKernel:
         method: str = "boost",
         output_coord: Optional[str] = None,
     ):
+        """Lorentz-form `H^d` bridge endpoint conditioned on a target embedding.
+
+        Lorentz analogue of [`poincare_bridge`].
+
+        Args:
+            ts (`torch.FloatTensor` of shape `(batch_size,)`):
+                Heat times.
+            targets (`torch.LongTensor` of shape `(batch_size,)`):
+                Vocabulary indices.
+            word_embedding (`torch.FloatTensor` of shape `(vocab_size, d)`):
+                Word-embedding table.
+            method (`str`, *optional*, defaults to `"boost"`):
+                Angular sampler.
+            output_coord (`str`, *optional*, defaults to `Coordinate.CARTESIAN`):
+                `Coordinate.POLAR` or `Coordinate.CARTESIAN`.
+
+        Returns:
+            POLAR: `(rhos, u_rotated)` matching [`free_poincare_heat_kernel`].
+            CARTESIAN: Lorentz-Cartesian coords of shape `(batch_size, d + 1)`.
+            Raises `ValueError` if `max(rho) > _LORENTZ_RHO_MAX`.
+        """
         d = word_embedding.shape[1]
         if d == 2:
             return FreeBinaryHyperbolicHeatKernel.binary_lorentz_bridge(
@@ -636,6 +1025,41 @@ class FreeHyperbolicHeatKernel:
         dest_angular: Optional[torch.FloatTensor] = None,
         output_coord: Optional[str] = None,
     ):
+        """Constant-speed hyperbolic geodesic on `H^d` from `src` to `dest` at fraction `t`.
+
+        Endpoints are accepted either as Lorentz-Cartesian tensors of shape
+        `(batch_size, d + 1)` or as polar pairs `(rho, theta_or_u)`; exactly one
+        form per endpoint must be provided.
+
+        Args:
+            t (`float` or `torch.Tensor`):
+                Fraction along the geodesic, broadcastable to the batch shape.
+            src (`torch.FloatTensor` of shape `(batch_size, d + 1)`, *optional*):
+                Lorentz-Cartesian source.
+            dest (`torch.FloatTensor` of shape `(batch_size, d + 1)`, *optional*):
+                Lorentz-Cartesian destination.
+            src_radial (`torch.FloatTensor` of shape `(batch_size,)`, *optional*):
+                Source radial coordinate.
+            src_angular (`torch.FloatTensor`, *optional*):
+                Source angular coordinate (scalar for `d == 2`, unit vector of
+                shape `(batch_size, d)` for `d >= 3`).
+            dest_radial (`torch.FloatTensor` of shape `(batch_size,)`, *optional*):
+                Destination radial coordinate.
+            dest_angular (`torch.FloatTensor`, *optional*):
+                Destination angular coordinate.
+            output_coord (`str`, *optional*):
+                `Coordinate.CARTESIAN` or `Coordinate.POLAR`. Defaults to the
+                same form used to specify the source.
+
+        Returns:
+            CARTESIAN: `torch.FloatTensor` of shape `(batch_size, d + 1)`.
+            POLAR: `(rhos, theta_or_u)` matching
+            [`lorentz_cartesian_to_poincare_polar`].
+
+        Raises:
+            ValueError: if neither or both forms of an endpoint are provided, or
+                if a polar input has `rho > _LORENTZ_RHO_MAX`.
+        """
         if (src is not None and (src_radial is not None or src_angular is not None)) or (
             src is None and (src_radial is None or src_angular is None)
         ):
@@ -676,6 +1100,7 @@ class FreeHyperbolicHeatKernel:
     @staticmethod
     @torch.no_grad()
     def _angular_boost(rhos: torch.FloatTensor, d: int) -> torch.FloatTensor:
+        """Lorentz-boost angular sampler. Cheapest per-sample cost."""
         B = rhos.shape[0]
         dtype = rhos.dtype
         device = rhos.device
@@ -696,6 +1121,7 @@ class FreeHyperbolicHeatKernel:
     @staticmethod
     @torch.no_grad()
     def _angular_icdf(rhos: torch.FloatTensor, d: int) -> torch.FloatTensor:
+        """ICDF angular sampler: polar coord from symmetric Beta, then `S^{d-2}` pad."""
         B = rhos.shape[0]
         dtype = rhos.dtype
         device = rhos.device
@@ -720,7 +1146,17 @@ class FreeHyperbolicHeatKernel:
     _angular_vmf = _angular_icdf
 
 class FreeSphericalHeatKernel:
-    """d-dimensional free spherical heat kernel sampler (kappa = +1 dual)."""
+    """`d`-dimensional free spherical heat kernel sampler on `S^d` (kappa = +1 dual).
+
+    The kappa-flipped Gruet ansatz `cos phi = v^2 + (1 - v^2) cos(s)` is empirically
+    correct only in the small-`t` regime; samplers refuse `max(t) > _SPHERE_T_MAX`
+    via [`_check_sphere_t_bound`]. The angular distribution is rotationally
+    symmetric around the polar axis, so [`sample_angular`] returns
+    `Uniform(S^{d-1})` regardless of the `method` argument (kept for API parity
+    with [`FreeHyperbolicHeatKernel`]).
+
+    All methods are `@staticmethod` and run under `torch.no_grad()`.
+    """
 
     METHOD_BOOST: str = "boost"
     METHOD_ICDF: str = "icdf"
@@ -729,6 +1165,21 @@ class FreeSphericalHeatKernel:
     @staticmethod
     @torch.no_grad()
     def sample_radial(ts: torch.FloatTensor, d: int) -> torch.FloatTensor:
+        """Sample the radial marginal `phi` (colatitude) of the `S^d` free heat kernel.
+
+        Args:
+            ts (`torch.FloatTensor` of shape `(batch_size,)`):
+                Heat times; must satisfy `max(ts) <= _SPHERE_T_MAX`.
+            d (`int`):
+                Spherical dimension; must be `>= 2`.
+
+        Returns:
+            `torch.FloatTensor` of shape `(batch_size,)`: colatitude samples in
+            `[0, pi]`.
+
+        Raises:
+            ValueError: if `max(ts) > _SPHERE_T_MAX` or `d < 2`.
+        """
         if d < 2:
             raise ValueError(f"FreeSphericalHeatKernel requires d >= 2; got d={d}")
         _check_sphere_t_bound(ts, d)
@@ -771,6 +1222,26 @@ class FreeSphericalHeatKernel:
         method: str = "boost",
         output_coord: Optional[str] = None,
     ):
+        """Sample from the free `S^d` heat kernel.
+
+        Args:
+            ts (`torch.FloatTensor` of shape `(batch_size,)`):
+                Heat times; must satisfy `max(ts) <= _SPHERE_T_MAX`.
+            d (`int`):
+                Spherical dimension; must be `>= 2`.
+            method (`str`, *optional*, defaults to `"boost"`):
+                Kept for API parity with [`FreeHyperbolicHeatKernel`]; ignored
+                because the angular marginal is `Uniform(S^{d-1})` for every
+                method.
+            output_coord (`str`, *optional*, defaults to `Coordinate.POLAR`):
+                `Coordinate.POLAR` or `Coordinate.CARTESIAN`.
+
+        Returns:
+            POLAR: `(phis, u)` where `phis` has shape `(batch_size,)` and `u` is
+            an azimuth of shape `(batch_size,)` for `d == 2` or a unit vector of
+            shape `(batch_size, d)` for `d >= 3`.
+            CARTESIAN: ambient sphere coordinates of shape `(batch_size, d + 1)`.
+        """
         if d < 2:
             raise ValueError(f"FreeSphericalHeatKernel requires d >= 2; got d={d}")
         if ts.numel() == 0:
@@ -794,6 +1265,28 @@ class FreeSphericalHeatKernel:
         method: str = "boost",
         output_coord: Optional[str] = None,
     ):
+        """Sample the `S^d` bridge endpoint conditioned on a target embedding.
+
+        The free-heat-kernel direction is rotated so that the polar axis `e_1`
+        aligns with the normalized target embedding (via angle offset for
+        `d == 2`, via Householder reflection for `d >= 3`).
+
+        Args:
+            ts (`torch.FloatTensor` of shape `(batch_size,)`):
+                Heat times.
+            targets (`torch.LongTensor` of shape `(batch_size,)`):
+                Vocabulary indices.
+            word_embedding (`torch.FloatTensor` of shape `(vocab_size, d)`):
+                Word-embedding table; `d = word_embedding.shape[1]`.
+            method (`str`, *optional*, defaults to `"boost"`):
+                Ignored — kept for API parity.
+            output_coord (`str`, *optional*, defaults to `Coordinate.POLAR`):
+                `Coordinate.POLAR` or `Coordinate.CARTESIAN`.
+
+        Returns:
+            POLAR: `(phis, u_rotated)` matching [`free_sphere_heat_kernel`].
+            CARTESIAN: ambient sphere coords of shape `(batch_size, d + 1)`.
+        """
         d = word_embedding.shape[1]
         if d < 2:
             raise ValueError(f"FreeSphericalHeatKernel requires d >= 2; got d={d}")
@@ -829,6 +1322,39 @@ class FreeSphericalHeatKernel:
         dest_angular: Optional[torch.FloatTensor] = None,
         output_coord: Optional[str] = None,
     ):
+        """Constant-speed spherical geodesic (SLERP) on `S^d` from `src` to `dest`.
+
+        Endpoints are accepted either as ambient Cartesian tensors of shape
+        `(batch_size, d + 1)` or as polar pairs `(phi, theta_or_u)`; exactly one
+        form per endpoint must be provided.
+
+        Args:
+            t (`float` or `torch.Tensor`):
+                Fraction along the geodesic, broadcastable to the batch shape.
+            src (`torch.FloatTensor` of shape `(batch_size, d + 1)`, *optional*):
+                Ambient Cartesian source.
+            dest (`torch.FloatTensor` of shape `(batch_size, d + 1)`, *optional*):
+                Ambient Cartesian destination.
+            src_radial (`torch.FloatTensor` of shape `(batch_size,)`, *optional*):
+                Source colatitude `phi`.
+            src_angular (`torch.FloatTensor`, *optional*):
+                Source azimuth (scalar for `d == 2`, unit vector of shape
+                `(batch_size, d)` for `d >= 3`).
+            dest_radial (`torch.FloatTensor` of shape `(batch_size,)`, *optional*):
+                Destination colatitude.
+            dest_angular (`torch.FloatTensor`, *optional*):
+                Destination azimuth.
+            output_coord (`str`, *optional*):
+                `Coordinate.CARTESIAN` or `Coordinate.POLAR`. Defaults to the
+                same form used to specify the source.
+
+        Returns:
+            CARTESIAN: `torch.FloatTensor` of shape `(batch_size, d + 1)`.
+            POLAR: `(phis, theta_or_u)` matching [`sphere_cartesian_to_polar`].
+
+        Raises:
+            ValueError: if neither or both forms of an endpoint are provided.
+        """
         if (src is not None and (src_radial is not None or src_angular is not None)) or (
             src is None and (src_radial is None or src_angular is None)
         ):
