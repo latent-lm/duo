@@ -57,8 +57,7 @@ img[alt~="center"] {
 
 ## The Question
 
-> As the test set grows $4\times10^4 \to 4\times10^8$, does
-> <b>`test_wnelbo`</b> converge to the data entropy?
+> As the test set grows $4\times10^4 \to 4\times10^8$, does IS-NELBO converge to the data entropy?
 > And does that convergence hold **across $\lambda$**?
 
 For an **optimal model** the IS-NELBO is an *unbiased* estimator of the entropy — so in principle "more data ⇒ tighter." 
@@ -70,7 +69,7 @@ For an **optimal model** the IS-NELBO is an *unbiased* estimator of the entropy 
 - Driver: `unigram/unigram_test2_tmp3.py` · script: `unigram_test_lorentz_tmp3.sh` · **seed = 42**
 - Model: **optimal** (`mode=opt`) — emits the ground-truth unigram, no training
 - Vocab 10 · Data dist $[0.91,\ 0.01\times 9]$ · entropy $H \approx$ **0.5003**
-- Geometry: **Poincaré–Polar** · bridge horizon `hyper_T=1000`, `hyper_dt=0.01`
+- Geometry: **Poincaré–Polar**
 - Proposal: **plain exponential** $p(t)=\lambda e^{-\lambda t}$, rate $\lambda \in \{0.01,0.1,0.2,0.3,0.5,0.8,1.0,2.0\}$
 - **test-set size:** $\{4\mathrm{e}4,\ 4\mathrm{e}5,\ 4\mathrm{e}6,\ 4\mathrm{e}7,\ 4\mathrm{e}8\}$
 
@@ -118,14 +117,14 @@ Only $\lambda=0.1,0.01$ mainten flat std, but others **grow** with $N$.
 
 | $\lambda$ | 4e4 | 4e5 | 4e6 | 4e7 | 4e8 |
 |:--:|:--:|:--:|:--:|:--:|:--:|
-| 0.01 | 0.5020 | 0.4449 | 0.4638 | 0.4611 | <r>0.4612</r> |
+| 0.01 | 0.5020 | 0.4449 | 0.4638 | 0.4611 | 0.4612 |
 | **0.1**  | 0.4681 | 0.4874 | 0.4901 | 0.4905 | 0.4905 |
 | **0.2**  | 0.4777 | 0.4946 | 0.4986 | **0.4999** | **0.4998** 
 | **0.3**  | 0.4670 | 0.4921 | 0.4974 | 0.5055 | 0.5066 |
 | 0.5  | 0.4919 | 0.4909 | 0.5049 | 0.5237 | 0.5195 |
 | 0.8  | 0.4861 | 0.6099 | 0.5253 | 0.5361 | 0.5293 |
 | 1.0  | 0.5018 | 0.5993 | 0.5271 | 0.5267 | 0.5264 |
-| 2.0  | 0.3874 | 0.4608 | 0.4433 | 0.4581 | <r>0.4564</r> |
+| 2.0  | 0.3874 | 0.4608 | 0.4433 | 0.4581 | 0.4564 |
 
 ---
 
@@ -230,71 +229,117 @@ $\times$ Learnable / Fixed Word Embedding
 
 - Driver `unigram/unigram_test2_tmp4.py` · script `unigram_test_lorentz_tmp4_loss_emb.sh` · `mode=tnb` (trains) · **seed 42** · 4M test
 - Vocab 10 · data $[0.91,\ 0.01\times 9]$ · entropy $H \approx$ **0.5003**
-- **Parametrization:** Horocycle $=$ `horo_cross_entropy` $\big(\mu=\mathrm{softmax}(f(z)+\text{horosphere})\big)$ vs Direct $=$ `cross_entropy` $\big(\mu=\mathrm{softmax}(f(z))\big)$
-- **Word embedding:** Learnable $\big(\phi_v=\mathrm{atan2}(e_v)$, `trainable_word_embedding=True`$\big)$ vs Fixed $\big($equally spaced $(v{+}0.5)\,2\pi/V\big)$
-- **Proposal swept, ELBO eval $=$ same proposal as loss:** `unif` $\times$ `hyper_T`$\in\{1000,2000,3000,5000\}$ and `stratified_exp` $\times\ \lambda\in\{1.0,0.1,0.2,0.3,0.8,0.5\}$
+- **Word embedding:** 
+  - Learnable (normalized when )
+  - Fixed $\big($equally spaced $(v{+}0.5)\,2\pi/V\big)$
+- **ELBO eval proposal = same loss propsoal** 
+  - unif: $[0.01, 10]$, $[0.01, 20]$, $[0.01, 30]$, $[0.01, 50]$
+  - Stratified Exp: $\lambda\in\{1.0,0.1,0.2,0.3,0.8,0.5\}$
 
 ---
 
 ## Results — the 2×2 at a glance
 
-| | **Learnable emb** | **Fixed emb** |
+| | **Learnable** | **Fixed** |
 |---|---|---|
-| **Horocycle** (horo-CE) | <r>**NaN — diverges (all 10)**</r> | finite · `wnelbo` **0.33–0.95** |
-| **Direct** (CE) | finite · `ce` 0.22–1.98 · `wnelbo` 0.68–77 | finite · $\approx$ Learnable |
+| **Horocycle** (horo-CE) | <r>**NaN**</r> | ``test_wnelbo`` **0.33–0.95** |
+| **Direct** (CE) | ``test_ce`` 0.22–1.98 ``test_wnelbo`` 0.68–77 |  $\approx$ Direct Learnable |
 
-- **Learnable embedding breaks Horocycle** (back-prop through the singular $\log(1-\cos(\theta-\phi_v))$ via $\phi_v$) but is **harmless for Direct** — Direct Learnable $\approx$ Fixed.
-- **Horocycle $\times$ Fixed** is the only well-behaved bridge ELBO (`test_wnelbo` $\approx 0.33$–$0.47$, low variance on `unif`).
-- **Direct (CE)** is a strong *denoiser* (low conditional `test_ce` on `unif`) but a poor *ELBO* estimator (large, heavy-tailed `test_wnelbo`).
+- Learnable embedding breaks Horocycle due to NaN
 
 ---
 
-## Horocycle (`horo_cross_entropy`)
+## Horocycle CE - Fixed Embedding
 
-**$\times$ Learnable:** `test_ce` $=$ `test_wnelbo` $=$ <r>**NaN**</r> for **every** proposal — the loss differentiates $\log(1-\cos(\theta-\phi_v))$ through the learnable $\phi_v$.
-
-**$\times$ Fixed** — `test_ce` $\pm$ std · `test_wnelbo` $\pm$ std:
+`test_ce` $\pm$ std · `test_wnelbo` $\pm$ std:
 
 | proposal | test_ce | test_wnelbo |
 |---|--:|--:|
-| unif hT=1000 | 0.441 ± 1.09 | **0.330** ± 1.67 |
-| unif hT=2000 | 0.475 ± 1.02 | 0.383 ± 2.58 |
-| unif hT=3000 | 0.536 ± 0.96 | 0.392 ± 3.22 |
-| unif hT=5000 | 0.679 ± 0.85 | 0.394 ± 4.21 |
-| strat λ=0.1 | 0.478 ± 1.06 | 0.402 ± 2.65 |
-| strat λ=0.2 | 0.446 ± 1.19 | 0.409 ± 3.82 |
-| strat λ=0.3 | 0.429 ± 1.29 | 0.417 ± 5.52 |
-| strat λ=0.5 | 0.478 ± 1.31 | 0.472 ± 11.3 |
-| strat λ=0.8 | 0.677 ± 1.12 | 0.628 ± 15.9 |
-| strat λ=1.0 | 1.085 ± 0.88 | 0.953 ± 15.7 |
+| unif $[0.01, 10]$ | 0.441 ± 1.09 | **0.330** ± 1.67 |
+| unif $[0.01, 20]$ | 0.475 ± 1.02 | 0.383 ± 2.58 |
+| unif $[0.01, 30]$ | 0.536 ± 0.96 | 0.392 ± 3.22 |
+| unif $[0.01, 50]$ | 0.679 ± 0.85 | 0.394 ± 4.21 |
 
 ---
 
-## Direct (`cross_entropy`) — Learnable $\approx$ Fixed
+## Horocycle CE - Fixed Embedding
 
-| proposal | ce (Learn) | ce (Fixed) | wnelbo (Learn) | wnelbo (Fixed) |
-|---|--:|--:|--:|--:|
-| unif hT=1000 | 0.340 | 0.316 | 0.684 | 0.721 |
-| unif hT=2000 | 0.283 | 0.262 | 1.308 | 1.380 |
-| unif hT=3000 | 0.251 | 0.238 | 1.879 | 2.008 |
-| unif hT=5000 | 0.222 | 0.217 | 2.981 | 3.256 |
-| strat λ=0.1 | 1.958 | 1.984 | 77.2 | 79.2 |
-| strat λ=0.2 | 1.967 | 1.981 | 31.0 | 32.7 |
-| strat λ=0.3 | 1.976 | 1.979 | 20.0 | 21.7 |
-| strat λ=0.5 | 1.982 | 1.979 | 11.2 | 12.7 |
-| strat λ=0.8 | 1.984 | 1.981 | 6.18 | 7.61 |
-| strat λ=1.0 | 1.985 | 1.982 | 4.58 | 5.93 |
+`test_ce` $\pm$ std · `test_wnelbo` $\pm$ std:
 
-- `ce_std`: $\approx$ 0.8–1.2 (`unif`), $\approx$ 0.18–0.26 (`stratified`, small $\Rightarrow$ <r>confidently wrong</r>).
-- `wnelbo_std`: **huge on stratified** ($\approx$ 75–1130) $\Rightarrow$ heavy-tailed, unreliable ELBO.
+| proposal | test_ce | test_wnelbo |
+|---|--:|--:|
+| strat exp $\lambda=0.1$ | 0.478 ± 1.06 | 0.402 ± 2.65 |
+| strat exp $\lambda=0.2$ | 0.446 ± 1.19 | 0.409 ± 3.82 |
+| strat exp $\lambda=0.3$ | 0.429 ± 1.29 | 0.417 ± 5.52 |
+| strat exp $\lambda=0.5$ | 0.478 ± 1.31 | 0.472 ± 11.3 |
+| strat exp $\lambda=0.8$ | 0.677 ± 1.12 | 0.628 ± 15.9 |
+| strat exp $\lambda=1.0$ | 1.085 ± 0.88 | 0.953 ± 15.7 |
+
+---
+
+## Direct CE — Fixed embedding
+
+`test_ce` $\pm$ std · `test_wnelbo` $\pm$ std:
+
+| proposal | test_ce | test_wnelbo |
+|---|--:|--:|
+| unif $[0.01, 10]$ | 0.316 ± 1.17 | 0.721 ± 2.76 |
+| unif $[0.01, 20]$ | 0.262 ± 0.99 | 1.380 ± 5.38 |
+| unif $[0.01, 30]$ | 0.238 ± 0.89 | 2.008 ± 7.90 |
+| unif $[0.01, 50]$ | 0.217 ± 0.80 | 3.256 ± 12.7 |
+
+
+---
+
+## Direct CE — Fixed embedding
+
+`test_ce` $\pm$ std · `test_wnelbo` $\pm$ std:
+
+| proposal | test_ce | test_wnelbo |
+|---|--:|--:|
+| strat exp $\lambda=0.1$ | 1.984 ± 0.26 | 79.2 ± 1131 |
+| strat exp $\lambda=0.2$ | 1.981 ± 0.23 | 32.7 ± 375 |
+| strat exp $\lambda=0.3$ | 1.979 ± 0.22 | 21.7 ± 268 |
+| strat exp $\lambda=0.5$ | 1.979 ± 0.22 | 12.7 ± 166 |
+| strat exp $\lambda=0.8$ | 1.981 ± 0.22 | 7.61 ± 102 |
+| strat exp $\lambda=1.0$ | 1.982 ± 0.22 | 5.93 ± 80.8 |
+
+---
+
+## Direct CE — Learnable embedding
+
+`test_ce` $\pm$ std · `test_wnelbo` $\pm$ std:
+
+| proposal | test_ce | test_wnelbo |
+|---|--:|--:|
+| unif $[0.01, 10]$ | 0.340 ± 1.12 | 0.684 ± 2.65 |
+| unif $[0.01, 20]$ | 0.283 ± 0.99 | 1.308 ± 5.13 |
+| unif $[0.01, 30]$ | 0.251 ± 0.91 | 1.879 ± 7.40 |
+| unif $[0.01, 50]$ | 0.222 ± 0.81 | 2.981 ± 11.5 |
+
+---
+
+## Direct CE — Learnable embedding
+
+`test_ce` $\pm$ std · `test_wnelbo` $\pm$ std:
+
+| proposal | test_ce | test_wnelbo |
+|---|--:|--:|
+| strat exp $\lambda=0.1$ | 1.958 ± 0.18 | 77.2 ± 1126 |
+| strat exp $\lambda=0.2$ | 1.967 ± 0.21 | 31.0 ± 374 |
+| strat exp $\lambda=0.3$ | 1.976 ± 0.23 | 20.0 ± 266 |
+| strat exp $\lambda=0.5$ | 1.982 ± 0.24 | 11.2 ± 163 |
+| strat exp $\lambda=0.8$ | 1.984 ± 0.24 | 6.18 ± 97.6 |
+| strat exp $\lambda=1.0$ | 1.985 ± 0.24 | 4.58 ± 75.5 |
 
 ---
 
 ## Conclusion
 
-- **Trainable embedding destabilizes only the Horocycle loss** $\Rightarrow$ NaN (it differentiates $\log(1-\cos(\theta-\phi_v))$ through $\phi_v$). **Direct (CE) is indifferent** to learnable vs fixed — no singular kernel in its loss, so Learnable $\approx$ Fixed.
+- **Trainable embedding causes NaN in Horocycle CE**
+- **Horocycle CE** has lower variance for fixed word embedding than Direct CE
 - **Fixed-embedding Horocycle** is the only setting with a sensible, low-variance bridge ELBO (`test_wnelbo` $\approx 0.33$–$0.47$).
-- **Direct (CE)** wins on conditional `test_ce` (denoising, beats $H$ on `unif`) but is a poor, heavy-tailed ELBO estimator; its `stratified` `test_ce` plateaus at $\approx 1.98 \approx 4H$ ("confidently wrong").
+- **Direct (CE)** wins on conditional `test_ce` (beats groud-truth entropy on `unif`) but is a poor, heavy-tailed ELBO estimator
 
 ---
 
@@ -369,13 +414,13 @@ $$
 ## Hyperbolic Geodesic
 
 - **It is SLERP with $\sin\!\to\!\sinh$, $\arccos\!\to\!\operatorname{arccosh}$** — same code, curvature flag $\kappa$: $\kappa{=}{+}1$ sphere ($\sin$), $\kappa{=}{-}1$ hyperboloid ($\sinh$). Stays on-manifold, $\langle\gamma(t),\gamma(t)\rangle_L=-1$.
-- **Numerically stable distance** — compute $d$ from the *difference vector*, not $\langle x,y\rangle_L$ (which cancels to $\approx 1$ at large radius / high $d$):
+<!-- - **Numerically stable distance** — compute $d$ from the *difference vector*, not $\langle x,y\rangle_L$ (which cancels to $\approx 1$ at large radius / high $d$):
 
 $$
 \cosh d-1=\tfrac12\,\langle x-y,\;x-y\rangle_L
 \;\;\Rightarrow\;\;
 d=\operatorname{arccosh}\!\Big(1+\tfrac12\langle x-y,x-y\rangle_L\Big)
-$$
+$$ -->
 
 ---
 
@@ -415,66 +460,3 @@ $$
 - Haven't derived the ELBO, but I think the performance on easy Sudoku is the most important test
 
 ---
-
-
-
-### Trainable boundary points: CE survives, Poincaré ELBO diverges
-
----
-
-## Set Up
-
-- Driver `unigram/unigram_test2_tmp4.py` · `mode=tnb` (**trains** the denoiser) · seed 42 · 4M test
-- **Learnable** embeddings: each word's boundary angle $=\operatorname{atan2}$ of its lm-head row
-- Two train losses: <r>`cross_entropy`</r> and <b>`poincare_polar`</b> ELBO with uniform and exp proposal swept
-- Target $=$ data entropy **0.5003** · CE `test_wnelbo` eval $=$ fixed PP stratified-exp(0.1)
-
----
-
-## CE-Fixed Proposal Set Up
-
-- CE `test_wnelbo` is evaluated by fixed proposal stratified-exp(0.1)
-
----
-
-## CE-Fixed Proposal — Stable, but Stuck 
-
-| proposal | `test_ce` | `ce_std` | `test_wnelbo` | `wnelbo_std` |
-|:--|:--:|:--:|:--:|:--:|
-| unif   | <b>0.356</b> | 1.17 | <b>0.570</b> | 3.74 |
-| exp 0.1 | 1.959 | 0.18 | 2.215 | 5.56 |
-| exp 0.2 | 1.968 | 0.21 | 2.227 | 5.58 |
-| exp 0.3 | 1.977 | 0.23 | 2.219 | 5.58 |
-| exp 0.5 | 1.984 | 0.24 | 2.195 | 5.56 |
-| exp 0.8 | 1.986 | 0.24 | 2.167 | 5.54 |
-| exp 1.0 | 1.987 | 0.24 | 2.154 | 5.53 |
-
----
-
-## PP-Fixed Proposal Set Up
-
-- PP (Poincare Polar) `test_wnelbo` is evaluated by identical proposal as loss
-
----
-
-## PP-trained — Diverges to NaN
-
-| proposal | `test_ce` | `ce_std` | `test_wnelbo` | `wnelbo_std` |
-|:--|:--:|:--:|:--:|:--:|
-| exp | <r>NaN</r> | <r>NaN</r> | <r>NaN</r> | <r>NaN</r> |
-
-`train_loss`: **2.07 → NaN at step 2.** Every Poincaré-ELBO run blows up almost immediately
-
----
-
-## Insight — The Embedding Was the Wrong Knob
-
-| train loss | fixed emb | learnable emb |
-|:--|:--:|:--:|
-| <b>Poincaré ELBO</b> | **best**, `wnelbo` ≈ 0.40 | <r>NaN — step 2</r> |
-| <r>Cross-entropy</r> | ~2.0 | ~2.0 |
-
-- **Trainable boundary points destabilize the ELBO**: its $1/\lVert y-z_t\rVert^2$ and $(1-\lVert z\rVert^2)^2$ terms blow up once $y$ can drift toward $z_t$.
-- **CE is robust but uninformative** — learnable vs fixed barely moves `test_ce`; still ~4× the entropy.
-- Net: learnability **broke the one loss that worked** (fixed-emb PP) and didn't help CE → needs boundary regularization / grad-clip / lower lr before ELBO training is viable.
-

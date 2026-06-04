@@ -67,7 +67,7 @@ class HyperBridge:
         return chi2.sqrt().reshape(nshape)
 
     @staticmethod
-    def wrapped_normal(shape, std):
+    def wrapped_normal(shape, std, device=None, dtype=None):
         r"""Sample `(rho, u)` from the wrapped normal on `H^d` centred at the origin.
 
         Draws a tangent-space Gaussian `v ~ N(0, Sigma)` at the origin and reads off
@@ -99,7 +99,7 @@ class HyperBridge:
         # sample a tangent-space Gaussian v ~ N(0, Sigma) and exp-map it at the
         # origin. Since exp_o(0, v) = (cosh||v||, sinh||v|| * v/||v||), the polar
         # coordinates are simply rho = ||v|| and direction u = v/||v||.
-        v = torch.randn(shape)
+        v = torch.randn(shape, device=device, dtype=dtype)
         # Apply the tangent-space scale `std`: scalar / (D,) diagonal scale each
         # axis; a (D, D) matrix is a Cholesky-style factor giving Cov = std std^T.
         if not torch.is_tensor(std):
@@ -263,17 +263,33 @@ class HyperBridge:
         word_embedding: Optional[torch.FloatTensor] = None,
         std: float = 1.0,
     ):
-        rhos, thetas = HyperBridge.wrapped_normal(shape=, std=std)
-        dest = word_embedding[targets]
-
-        dest_radial = dest.norm(p=2, keepdim=True, dim=-1)
-        dest_angle = dest / dest_radial
+        # Hyperbolic RFM path on H^2: geodesic from a wrapped-normal noise point
+        # (ts=0) to the target word's hyperbolic embedding (ts=1). The word
+        # embedding row is read as a tangent vector at the origin -> polar
+        # (rho = ||e||, angle = atan2(e_y, e_x)). `ts` is the geodesic fraction in
+        # [0, 1]. `vocab_size` is unused (the target endpoint comes from the
+        # embedding directly).
+        del vocab_size
+        if word_embedding is None:
+            raise ValueError(
+                "binary_geodesic_bridge (HYPERBOLIC_RFM) needs a learnable "
+                "word_embedding; set trainable_word_embedding=True."
+            )
+        dest = word_embedding[targets].to(ts.dtype)                 # (batch, d) tangent vec
+        # Noise endpoint: wrapped normal in the tangent space at the origin.
+        src_radial, src_dir = HyperBridge.wrapped_normal(
+            shape=dest.shape, std=std, device=ts.device, dtype=ts.dtype,
+        )
+        # H^2: the unit direction <-> a scalar polar angle expected by `geodesic`.
+        src_angle = torch.atan2(src_dir[..., 1], src_dir[..., 0])   # (batch,)
+        dest_radial = dest.norm(p=2, dim=-1)                        # (batch,)
+        dest_angle = torch.atan2(dest[..., 1], dest[..., 0])        # (batch,)
         rhos_t, thetas_t = HyperBridge.geodesic(
-            src_radial=rhos,
-            src_angle=thetas,
+            src_radial=src_radial,
+            src_angle=src_angle,
             dest_radial=dest_radial,
             dest_angle=dest_angle,
-            ts=ts
+            ts=ts,
         )
         return rhos_t, thetas_t
 
@@ -794,6 +810,11 @@ class HyperbolicDLM(L.LightningModule):
         # ((v+0.5)*2*pi/V) instead of learned; the lm-head still trains as the logit
         # readout. See the word_embedding property.
         self.trainable_word_embedding = bool(config.get("trainable_word_embedding", None))
+        self.flow_path = str(self.config.get("flow_path", None))
+
+        if not self.trainable_word_embedding and self.flow_path == FlowPath.HYPERBOLIC_RFM:
+            raise ValueError(f"config.flow_path = {FlowPath.HYPERBOLIC_RFM} requires config.trainable_word_embedding = True.")
+
 
         if "lorentz" in self.loss_geometry:
             self.model_input_dim = self.hyper_dim + 1
@@ -998,6 +1019,12 @@ class HyperbolicDLM(L.LightningModule):
                 word_embedding=word_embedding,
             )
         elif self.config.flow_path == FlowPath.HYPERBOLIC_RFM:
+            # RFM flow time is the geodesic fraction t ~ Uniform[0,1] (ts=0 -> noise,
+            # ts=1 -> target). The boundary-bridge importance proposal does not apply,
+            # so we override ts/weight here (weight = 1, plain CE expectation over t)
+            # and feed this same t to the model below.
+            ts = torch.rand((batch_size,), device=device, dtype=torch.float64, generator=generator)
+            proposal_weight = torch.ones_like(ts)
             rhos, thetas = self.bridge.binary_geodesic_bridge(
                 ts=ts,
                 targets=targets,
@@ -1463,6 +1490,7 @@ def main(cfg: DictConfig) -> None:
             "nelbo_geometry": "poincare_polar",
             "rotate_emb": False,
             "trainable_word_embedding": True,
+            "flow_path": "hyperbolic_boundary",
             "lr": 1e-5,
             "ps": [0.91, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01],
             # "ps": [0.1] * 10,
