@@ -1030,6 +1030,7 @@ class HyperbolicDLM(L.LightningModule):
                 targets=targets,
                 vocab_size=vocab_size,
                 word_embedding=word_embedding,
+                std=float(self.config.get("rfm_std", 1.0)),
             )
         else:
             raise ValueError(f"config.flow_path = {self.config.flow_path} is not supported, only suppport ({FlowPath.HYPERBOLIC_BOUNDARY}, {FlowPath.HYPERBOLIC_RFM}).")
@@ -1491,6 +1492,7 @@ def main(cfg: DictConfig) -> None:
             "rotate_emb": False,
             "trainable_word_embedding": True,
             "flow_path": "hyperbolic_boundary",
+            "rfm_std": 1.0,
             "lr": 1e-5,
             "ps": [0.91, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01],
             # "ps": [0.1] * 10,
