@@ -334,12 +334,55 @@ $\times$ Learnable / Fixed Word Embedding
 
 ---
 
+## Poincaré-Polar ELBO — Fixed embedding
+
+`test_ce` $\pm$ std · `test_wnelbo` $\pm$ std:
+
+| proposal | test_ce | test_wnelbo |
+|---|--:|--:|
+| unif $[0.01, 10]$ | 0.957 ± 1.54 | 0.329 ± 1.75 |
+| unif $[0.01, 20]$ | 1.807 ± 1.65 | 0.381 ± 2.64 |
+| unif $[0.01, 30]$ | 2.435 ± 1.79 | 0.396 ± 3.30 |
+| unif $[0.01, 50]$ | 2.379 ± 1.51 | 0.412 ± 4.30 |
+
+---
+
+## Poincaré-Polar ELBO — Fixed embedding
+
+`test_ce` $\pm$ std · `test_wnelbo` $\pm$ std:
+
+| proposal | test_ce | test_wnelbo |
+|---|--:|--:|
+| strat exp $\lambda=0.1$ | 1.835 ± 1.93 | 0.396 ± 2.71 |
+| strat exp $\lambda=0.2$ | 0.860 ± 1.50 | 0.421 ± 8.43 |
+| strat exp $\lambda=0.3$ | **0.570 ± 1.58** |**0.437 ± 8.10** |
+| strat exp $\lambda=0.5$ | 1.018 ± 1.25 | 0.760 ± 25.2 |
+| strat exp $\lambda=0.8$ | 1.827 ± 0.66 | 1.268 ± 21.8 |
+| strat exp $\lambda=1.0$ | 2.065 ± 0.57 | 1.379 ± 23.4 |
+
+- **Best ELBO: 0.39**, **Best CE: 0.57**
+
+---
+
+## Poincaré-Polar ELBO — Learnable embedding
+
+`test_ce` $=$ `test_wnelbo` $=$ <r>**NaN**</r> for **all 10** proposals (unif + stratified).
+
+---
+
 ## Conclusion
 
 - **Trainable embedding causes NaN in Horocycle CE**
-- **Horocycle CE** has lower variance for fixed word embedding than Direct CE
+- **Horocycle CE** has lower variance and ``test_wnelbo`` for fixed word embedding than Direct CE
 - **Fixed-embedding Horocycle** is the only setting with a sensible, low-variance bridge ELBO (`test_wnelbo` $\approx 0.33$–$0.47$).
 - **Direct (CE)** wins on conditional `test_ce` (beats groud-truth entropy on `unif`) but is a poor, heavy-tailed ELBO estimator
+
+---
+
+## Conclusion
+
+- ELBO Loss: align the velocity but might choose wrong token or the trainable word embeddings might collapse
+- CE Loss: It misaligned the velocity regression since it only pick the most possible token
 
 ---
 
@@ -400,6 +443,18 @@ $$
 
 ---
 
+## FLOW MATCHING ON GENERAL GEOMETRIES
+
+![alt text](image-3.png)
+
+---
+
+## FLOW MATCHING ON GENERAL GEOMETRIES
+
+![w:600px center](image-2.png)
+
+---
+
 ## Hyperbolic Geodesic
 
 Lorentz model $\mathbb{H}^d=\{z:\langle z,z\rangle_L=-1\}$, with $\langle a,b\rangle_L=-a_0 b_0+\sum_{i\ge 1} a_i b_i$. Constant-speed geodesic from $x$ ($t{=}0$) to $y$ ($t{=}1$):
@@ -421,18 +476,6 @@ $$
 \;\;\Rightarrow\;\;
 d=\operatorname{arccosh}\!\Big(1+\tfrac12\langle x-y,x-y\rangle_L\Big)
 $$ -->
-
----
-
-## FLOW MATCHING ON GENERAL GEOMETRIES
-
-![alt text](image-3.png)
-
----
-
-## FLOW MATCHING ON GENERAL GEOMETRIES
-
-![w:600px center](image-2.png)
 
 ---
 
