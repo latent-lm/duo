@@ -359,15 +359,16 @@ def tf_embed(rhos, thetas, embeds):
 # In[9]:
 
 
-trainset = torch.load("drive/MyDrive/Colab Notebooks/trainset_circle.pt", weights_only=True)
+# trainset = torch.load("drive/MyDrive/Colab Notebooks/trainset_circle.pt", weights_only=True)  # data unavailable
+import utils  # all experiment utilities (proposals, dataset, accumulation, plotting) live here
 
 
 # In[10]:
 
 
-train_batches = trainset['mapped_batches'].view(-1,64,32)
-(nbatches,batchsize,seqlen) = train_batches.shape
-V = trainset['initial_bias'].shape[0]
+# train_batches = trainset['mapped_batches'].view(-1,64,32)   # ORIGINAL data
+# (nbatches,batchsize,seqlen) = train_batches.shape           # set up the dataset same as the slides:
+V, ps, initial_bias_vec, (nbatches,batchsize,seqlen) = utils.unigram_dataset()  # V=10, ps=[0.91,0.01x9]
 print(f'nbatches: {nbatches}')
 print(f'batchsize: {batchsize}')
 print(f'seqlen: {seqlen}')
@@ -377,17 +378,18 @@ print(f'V: {V}')
 # In[11]:
 
 
-trainset.keys()
+# trainset.keys()
 
 
 # In[12]:
 
 
-initial_bias = trainset['initial_bias'].to(torch.float64).cuda()
+# initial_bias = trainset['initial_bias'].to(torch.float64).cuda()  # ORIGINAL (GPU); no GPU here -> CPU float64
+initial_bias = initial_bias_vec.to(torch.float64)   # = log p(y): the optimal logits / equally-divided prior
 initial_probs = initial_bias.exp()
 prior_entropy = torch.special.entr(initial_probs).sum()
 print(initial_probs.sum().item())
-print(prior_entropy.item())
+print(prior_entropy.item())   # prior_entropy == data entropy H ~= 0.5003 nats (the ELBO target)
 
 
 # In[13]:
@@ -432,94 +434,92 @@ config = {'model':config}
 # In[15]:
 
 
-checkpoint = torch.load('drive/MyDrive/Colab Notebooks/ddit_circle.pt')
+# checkpoint = torch.load('drive/MyDrive/Colab Notebooks/ddit_circle.pt')  # checkpoint unavailable; eval untrained model
 
 
 # In[16]:
 
 
 model = DIT(config=config,vocab_size=V)
-model.train()
-model = model.to('cuda').to(torch.bfloat16)
-# model.load_state_dict(checkpoint['model'])
+model.eval()   # ESSENTIAL: evaluate, not train. DDitFinalLayer zero-inits its weight, so an
+# model = model.to('cuda').to(torch.bfloat16)   # untrained eval DIT outputs 0 -> logits =
+# model.load_state_dict(checkpoint['model'])    # model(z)-model(z0)+initial_bias = log p(y) =
+# Bayes-optimal model, used directly below (tf_embed also needs V=2^k; slide V=10).
 
 
 # In[17]:
 
 
 # heuristic setting for lambda
-lamb = 0.06
+# lamb = 0.06   # superseded: the proposal (incl. its rate) is now swept, see utils.PROPOSALS
 
 
 # In[18]:
 
 
-opt = torch.optim.Adam(model.parameters(), 3e-4, (0.9,0.999), 1e-8) # 3e-4
-scheduler = transformers.get_constant_schedule_with_warmup(opt, 1000)
+# opt = torch.optim.Adam(model.parameters(), 3e-4, (0.9,0.999), 1e-8) # 3e-4      # COMMENTED: no training
+# scheduler = transformers.get_constant_schedule_with_warmup(opt, 1000)            # COMMENTED: no training
 
 
 # In[19]:
 
 
-with torch.device('cuda'):
+# ESSENTIAL MODIFICATION: notebook training loop -> eval-only ELBO sweep over
+# stratified_exp + unif (no backprop; variance-reduction lambda-estimator commented out).
+results = {}
+for (pname, pkw) in utils.PROPOSALS:           # sweep stratified_exp + unif (slide config)
+ for SEED in utils.SEEDS:
+  torch.manual_seed(SEED)                       # bbridge() draws from the global RNG
+  g = torch.Generator().manual_seed(SEED)
+  N = nbatches*batchsize*seqlen
+  train_batches = torch.multinomial(initial_probs, N, replacement=True, generator=g).view(nbatches,batchsize,seqlen)
+  ts_all, w_all = utils.sample_proposal(N, generator=g, **pkw)   # MODIFIED: was per-batch stratified-only
+  acc = utils.Accum(H=prior_entropy.item())
   saved_losses = []
   avg_loss = 0.0
   avg_loss_denom = 0.0
-  lamb_est_num = 0.0
-  lamb_est_den = 0.0
-  progress_bar = tqdm(range(nbatches))
+  # lamb_est_num = 0.0; lamb_est_den = 0.0       # COMMENTED: variance-reduction (adaptive-lambda) tricks
+  progress_bar = tqdm(range(nbatches), desc=f"{pname} seed={SEED}")
   for ibatch in progress_bar:
-      opt.zero_grad()
-      targets = train_batches[ibatch,:].cuda().to(torch.int64)
-      ts = -((torch.arange(batchsize) + torch.rand(batchsize,dtype=torch.float64)) / batchsize).log() / lamb
-      weights = (lamb*ts).exp()/lamb
-      assert(ts.isfinite().all())
-      ts = ts[:,None].expand(targets.shape).reshape(-1)
-      weights = weights[:,None].expand(targets.shape).reshape(-1)
-      targets = targets.reshape(-1)
+      # opt.zero_grad()                          # COMMENTED: no training
+      targets = train_batches[ibatch,:].to(torch.int64).reshape(-1)
+      ts = ts_all[ibatch*batchsize*seqlen:(ibatch+1)*batchsize*seqlen]      # MODIFIED: slice precomputed proposal
+      weights = w_all[ibatch*batchsize*seqlen:(ibatch+1)*batchsize*seqlen]
       (rhos, thetas) = bbridge(ts)
       thetas = thetas + (targets.to(torch.float64) + 0.5) * (2 * torch.pi / V)
       assert(rhos.isfinite().all())
       assert(thetas.isfinite().all())
-      z = tf_embed(rhos, thetas, model.vocab_embed.embedding).to(torch.bfloat16)
-      z0 = tf_embed(torch.zeros(1,dtype=torch.float64), torch.zeros(1,dtype=torch.float64), model.vocab_embed.embedding).to(torch.bfloat16)
-      logits = model(z.reshape(batchsize,seqlen,config['model']['hidden_size']))
-      logits = logits - model(z0[None,:,:].expand(1,seqlen,config['model']['hidden_size']))
-      logits = logits + initial_bias[None,None,:]
-      logits = logits.reshape(-1,V)
+      # z = tf_embed(...); logits = model(z) - model(z0) + initial_bias     # COMMENTED: untrained DIT=0 & V!=2^k
+      logits = initial_bias[None,:].expand(targets.shape[0], V)             # logits = log p(y) = optimal model
       losses = bridge_loss(logits, targets, rhos, thetas)
       losses = losses * weights
-      l = losses.mean() # the actual minibatch loss
-      lamb_est_num = (lamb_est_num * 0.99) + losses.square().mean().detach().item()
-      lamb_est_den = (lamb_est_den * 0.99) + (ts*losses.square()).mean().detach().item()
+      l = losses.mean() # the actual minibatch loss (per-batch weighted NELBO)
       avg_loss = (avg_loss * 0.99) + l.item()
       avg_loss_denom = (avg_loss_denom * 0.99) + 1.0
       saved_losses.append(avg_loss/avg_loss_denom)
-      progress_bar.set_description(f"{l.item()} [avg={avg_loss/avg_loss_denom}] [lamb={lamb_est_num/lamb_est_den}]")
-      l.backward()
-      opt.step()
-      scheduler.step()
-      if ibatch % 100 == 99:
-          pyplot.figure()
-          pyplot.plot(saved_losses)
-          pyplot.plot(checkpoint['saved_losses'][:len(saved_losses)])
-          pyplot.xlabel('step')
-          pyplot.ylabel('NELBO')
-          pyplot.title('Hyperbolic Diffusion Model on Wikitext')
-          pyplot.savefig('drive/MyDrive/Colab Notebooks/fig_in_training_circle_small.png')
-          pyplot.show()
+      acc.update(losses, logits, targets, weights)
+      progress_bar.set_description(f"{pname} seed={SEED} [avg_nelbo={avg_loss/avg_loss_denom:.4f}]")
+      # l.backward(); opt.step(); scheduler.step()   # COMMENTED: no training
+  results[(pname, SEED)] = acc.summary()
+  print(f"[{pname} seed={SEED}] test_wnelbo={results[(pname,SEED)]['wnelbo_mean']:.4f}"
+        f" +/- {results[(pname,SEED)]['wnelbo_std']:.2f}  test_ce={results[(pname,SEED)]['ce_mean']:.4f}")
+
+utils.dump_results(results)                                       # per-seed JSON (parallel-friendly)
+if len(utils.SEEDS) > 1:                                          # full run -> figure + table + slide comparison
+    utils.aggregate_and_plot(utils.load_all_results(), prior_entropy.item())
 
 
 # In[ ]:
 
 
-pyplot.plot(saved_losses)
+pyplot.figure(); pyplot.plot(saved_losses); pyplot.xlabel('batch'); pyplot.ylabel('running NELBO')
+pyplot.title(f'eval NELBO curve (last proposal/seed)'); pyplot.savefig('loss_curve.png')   # log training/testing loss
 
 
 # In[ ]:
 
 
-sd = model.state_dict()
+# sd = model.state_dict()   # nothing to save: model is untrained (eval-only)
 # torch.save({"model": sd, "saved_losses": saved_losses},'drive/MyDrive/Colab Notebooks/ddit_circle_randperm.pt')
 
 

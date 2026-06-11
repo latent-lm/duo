@@ -10,9 +10,9 @@ loss_type: elbo
 
 # Hyperbolic diffusion parameters
 trainset_path: /share/thickstun/sychou/workspace/research/duo/hyper_dataset/word_embedding/trainset_gpt2_wikitext2_ml128_bs32.pt
-noise_euler_steps: 128
+noise_euler_steps: 128  # UNUSED post-polar-retrofit
 hyper_T: 1000
-lamb_factor: 0.25
-lamb_decay_exp: 0.05
+lamb_factor: 0.25  # UNUSED post-polar-retrofit
+lamb_decay_exp: 0.05  # UNUSED post-polar-retrofit
 tainable_hyper_embeds: False
-hyper_loss_type: l2  # l2, raw_kl, or ce
+hyper_loss_type: cross_entropy  # cross_entropy or poincare_polar
